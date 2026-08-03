@@ -1,0 +1,10 @@
+{
+  "name": "Collaborative Whiteboard",
+  "description": "An interactive digital whiteboard featuring real-time synchronization, shapes, connectors, freehand drawing, voice notes, and collaborative canvas tools.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

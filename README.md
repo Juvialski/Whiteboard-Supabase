@@ -1,11 +1,44 @@
-<div align="center">
+# Collaborative Whiteboard — Supabase Edition
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+This repository uses a fresh Supabase backend. It does not read, migrate, or depend on the old Firebase database.
 
-  <h1>Built with AI Studio</h2>
+## Included backend design
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+- Supabase Auth for Google and anonymous guest sessions
+- Postgres with Row Level Security for boards, permissions, presence, and settings
+- 16 deterministic JSONB state shards per board
+- One atomic `apply_board_mutations` RPC for each debounced save checkpoint
+- Private Supabase Storage for images, audio, signatures, and PDF pages
+- The existing Node WebSocket relay for cursors, drawing previews, live element updates, and shard-change notifications
+- IndexedDB recovery for unflushed local mutations
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Start here
 
-</div>
+1. Create a new Supabase project.
+2. Run `supabase-schema.sql` in the Supabase SQL Editor.
+3. Enable Google and Anonymous sign-ins in Supabase Authentication.
+4. Copy `.env.example` to `.env.local` and enter the project URL and publishable key.
+5. Install and run:
+
+```bash
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+Read [SUPABASE_SETUP.md](SUPABASE_SETUP.md) for exact dashboard and deployment steps.
+
+## Commands
+
+```bash
+npm run dev       # Vite + Node WebSocket relay
+npm run build     # Production frontend bundle
+npm run start     # Run the Node server; NODE_ENV=production serves dist
+npm run lint      # TypeScript validation
+npm test          # Vitest suite
+```
+
+## Important security rule
+
+Only put the Supabase **publishable key** in `VITE_SUPABASE_PUBLISHABLE_KEY`. Never put a service-role or secret key in browser environment variables.
