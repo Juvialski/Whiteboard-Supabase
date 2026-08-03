@@ -1,6 +1,6 @@
 import { get as idbGet, set as idbSet, del as idbDel } from 'idb-keyval';
 import { auth, authPersistenceReady, supabase } from '../supabase';
-import { signInAnonymously } from '../lib/supabaseAuth';
+import { getAuthErrorDetails, isOAuthFlowInProgress, signInAnonymously } from '../lib/supabaseAuth';
 import { type BoardElement } from '../types';
 import {
   getSandboxLocalElements,
@@ -281,13 +281,23 @@ export function partitionElementsIntoChunks(
 
 export async function ensureAuthUser() {
   await authPersistenceReady.catch(() => undefined);
-  if (auth.currentUser) return auth.currentUser;
   if (isSandboxEnvironment()) return null;
+
   try {
+    await auth.authStateReady();
+    if (auth.currentUser) return auth.currentUser;
+
+    // Never create a guest account while Supabase is exchanging a Google OAuth
+    // callback. The permanent Google session must be allowed to settle first.
+    if (isOAuthFlowInProgress()) return null;
+
     const credential = await signInAnonymously(auth);
     return credential.user;
   } catch (error) {
-    console.error('Supabase anonymous sign-in failed. Enable Anonymous Sign-Ins in Supabase Auth.', error);
+    const details = getAuthErrorDetails(error);
+    if (details.code !== 'oauth_in_progress') {
+      console.error('Supabase guest sign-in failed.', details);
+    }
     return null;
   }
 }
@@ -468,7 +478,8 @@ export async function loadBoardState(boardId: string): Promise<BoardState> {
     };
   }
 
-  await ensureAuthUser();
+  const user = await ensureAuthUser();
+  if (!user) throw new Error('Supabase authentication is not ready. Finish Google sign-in or retry guest access.');
   const control = getOrCreateControl(boardId);
   if (!control.hydrated && control.loadState === 'idle') await fetchBoardAndAllShards(control);
   else await control.hydrationPromise;
@@ -514,7 +525,10 @@ export function subscribeToBoardState(
 
   if (!control.hydrated && control.loadState === 'idle') {
     void ensureAuthUser()
-      .then(() => fetchBoardAndAllShards(control))
+      .then((user) => {
+        if (!user) throw new Error('Supabase authentication is not ready. Finish Google sign-in or retry guest access.');
+        return fetchBoardAndAllShards(control);
+      })
       .catch((error) => {
         console.error('Supabase board load failed:', error);
         control.loadState = 'error';
@@ -614,7 +628,8 @@ export async function flushBoardCheckpoint(boardId: string, _reason: string = 'm
     return;
   }
 
-  await ensureAuthUser();
+  const user = await ensureAuthUser();
+  if (!user) throw new Error('Supabase authentication is not ready. Finish Google sign-in or retry guest access.');
   if (!control.hydrated && control.loadState === 'idle') await fetchBoardAndAllShards(control);
   else await control.hydrationPromise;
 
@@ -708,7 +723,8 @@ export async function initializeBoardWithElements(
   elements: BoardElement[],
   boardData: any
 ): Promise<void> {
-  await ensureAuthUser();
+  const user = await ensureAuthUser();
+  if (!user) throw new Error('Supabase authentication is not ready. Finish Google sign-in or retry guest access.');
 
   const { error: patchError } = await supabase.rpc('patch_board', {
     p_board_id: boardId,

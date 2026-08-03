@@ -30,7 +30,7 @@ export default function Dashboard({
   adminClaim = false
 }: DashboardProps) {
   const [boards, setBoards] = useState<Whiteboard[]>([]);
-  const [authError, setAuthError] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const PAGE_SIZE = 12;
@@ -266,7 +266,7 @@ export default function Dashboard({
         const { ensureAuthUser } = await import('../services/boardPersistence');
         const user = await ensureAuthUser();
         if (!user || !user.uid) {
-          alert("Authentication failed. Cannot produce a valid user ID. Please sign in to upload a PDF.");
+          alert("Authentication is not ready. Finish Google sign-in or retry the upload.");
           return;
         }
         ownerUid = user.uid;
@@ -458,14 +458,19 @@ export default function Dashboard({
     }
 
     try {
-      const { ensureAuthUser } = await import('../services/boardPersistence');
-      const user = await ensureAuthUser();
+      // Listing the dashboard is read-only and must not create a new anonymous
+      // Auth user. Guest authentication is created only after an explicit action
+      // such as creating a board or joining a shared link.
+      await auth.authStateReady();
+      const user = auth.currentUser;
       if (!user) {
-        setAuthError(true);
+        setAuthError(null);
         setBoards([]);
+        setCurrentPage(page);
+        setHasMore(false);
         return;
       }
-      setAuthError(false);
+      setAuthError(null);
 
       const requestedLimit = PAGE_SIZE + 1;
       const { data, error } = await supabase.rpc('list_my_boards', {
@@ -504,6 +509,7 @@ export default function Dashboard({
       setHasMore(rows.length > PAGE_SIZE);
     } catch (err) {
       console.error('Error fetching whiteboards:', err);
+      setAuthError(err instanceof Error ? err.message : String(err));
       setBoards([]);
     }
   }, []);
@@ -535,7 +541,7 @@ export default function Dashboard({
       const { ensureAuthUser } = await import('../services/boardPersistence');
       const user = await ensureAuthUser();
       if (!user || !user.uid) {
-        alert("Authentication failed. Cannot produce a valid user ID. Please sign in to create a board.");
+        alert("Authentication is not ready. Finish Google sign-in or retry creating the board.");
         return;
       }
       ownerUid = user.uid;
@@ -626,7 +632,7 @@ export default function Dashboard({
       const { ensureAuthUser } = await import('../services/boardPersistence');
       const user = await ensureAuthUser();
       if (!user || !user.uid) {
-        alert("Authentication failed. Cannot produce a valid user ID. Please sign in.");
+        alert("Authentication is not ready. Finish Google sign-in or retry guest access.");
         return;
       }
 
@@ -824,19 +830,14 @@ export default function Dashboard({
           <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-5 flex flex-col md:flex-row items-start justify-between gap-4 shadow-sm">
             <div className="flex-1 space-y-1">
               <h3 className="text-sm font-bold text-amber-800 flex items-center gap-2">
-                <span>⚠️ Anonymous Sign-Ins Are Disabled in Supabase</span>
+                <span>⚠️ Supabase Session or Board List Error</span>
               </h3>
               <p className="text-xs text-amber-700 leading-relaxed">
-                Guest users need Supabase anonymous sign-ins so every board request has a secure authenticated user ID.
+                {authError}
               </p>
-              <div className="text-xs text-amber-800 mt-2">
-                <strong>To fix this:</strong>
-                <ol className="list-decimal pl-5 mt-1 space-y-0.5 font-medium">
-                  <li>Open your <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" className="underline font-bold text-blue-700">Supabase Dashboard</a> and select the project.</li>
-                  <li>Open <strong>Authentication</strong> &rarr; <strong>Providers</strong> &rarr; <strong>Anonymous</strong>.</li>
-                  <li>Toggle <strong>Enable Anonymous Sign-Ins</strong> ON and click <strong>Save</strong>.</li>
-                </ol>
-              </div>
+              <p className="text-xs text-amber-800 mt-2 font-medium">
+                Google sign-in and guest sign-in are handled separately. This message no longer assumes the Anonymous provider is disabled.
+              </p>
             </div>
             <button
               onClick={() => {

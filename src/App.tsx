@@ -21,6 +21,7 @@ export default function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [authInitialized, setAuthInitialized] = useState(false);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [appEnabled, setAppEnabled] = useState<boolean>(true);
   const [adminClaim, setAdminClaim] = useState(false);
 
@@ -35,8 +36,10 @@ export default function App() {
     const urlBoardId = params.get('board');
 
     // Subscribe to Supabase authentication changes
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
       let activeProfile: UserProfile | null = null;
+
+      setAuthUserId(user?.uid || null);
 
       if (user) {
         // Preserve the chosen guest name for anonymous users. Treating every
@@ -64,14 +67,15 @@ export default function App() {
         };
         setProfile(activeProfile);
 
-        // Fetch custom claim
-        try {
-          const idTokenResult = await user.getIdTokenResult();
-          setAdminClaim(!!idTokenResult.claims.admin);
-        } catch (err) {
-          console.error('Error fetching admin claim:', err);
-          setAdminClaim(false);
-        }
+        // Run the administrator lookup outside Supabase's auth callback lock.
+        void user.getIdTokenResult()
+          .then((idTokenResult) => {
+            setAdminClaim(Boolean(idTokenResult.claims.admin));
+          })
+          .catch((err) => {
+            console.error('Error fetching admin claim:', err);
+            setAdminClaim(false);
+          });
 
         if (urlBoardId) {
           joinBoardDirectly(urlBoardId, activeProfile);
@@ -114,43 +118,29 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Read the global app status only after a Supabase session exists.
+  // Read the global app status only when a real Supabase session exists.
+  // Loading the landing page must never create an anonymous Auth user.
   useEffect(() => {
-    if (isSandboxEnvironment()) {
+    if (isSandboxEnvironment() || !authInitialized || !authUserId) {
       setAppEnabled(true);
       return;
     }
-    if (!authInitialized) return;
 
-    let unsubscribe = () => undefined;
-    let cancelled = false;
-    void import('./services/boardPersistence')
-      .then(({ ensureAuthUser }) => ensureAuthUser())
-      .then((user) => {
-        if (cancelled || !user) return;
-        const settingsRef = doc(db, 'admin_settings', 'global');
-        unsubscribe = onSnapshot(settingsRef, (docSnap) => {
-          if (!docSnap.exists()) {
-            setAppEnabled(true);
-            return;
-          }
-          const data = docSnap.data();
-          setAppEnabled(data.appEnabled !== false);
-        }, (error) => {
-          console.error('Error loading global Supabase settings:', error);
-          setAppEnabled(true);
-        });
-      })
-      .catch((error) => {
-        console.error('Unable to initialize Supabase settings:', error);
+    const settingsRef = doc(db, 'admin_settings', 'global');
+    const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
+      if (!docSnap.exists()) {
         setAppEnabled(true);
-      });
+        return;
+      }
+      const data = docSnap.data();
+      setAppEnabled(data.appEnabled !== false);
+    }, (error) => {
+      console.error('Error loading global Supabase settings:', error);
+      setAppEnabled(true);
+    });
 
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [authInitialized]);
+    return () => unsubscribe();
+  }, [authInitialized, authUserId]);
 
   // Track meaningful presence transitions without periodic database heartbeats
   const lastPresenceUpdateRef = React.useRef<number>(0);
@@ -314,7 +304,7 @@ export default function App() {
         const { ensureAuthUser } = await import('./services/boardPersistence');
         const authenticated = await ensureAuthUser();
         if (!authenticated) {
-          alert('Guest access is not enabled in Supabase. Enable Anonymous Sign-Ins or use Google sign-in.');
+          alert('Authentication is still being prepared. Finish Google sign-in or try guest access again.');
           return;
         }
         userProfile.id = authenticated.uid;

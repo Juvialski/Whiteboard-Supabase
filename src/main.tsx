@@ -5,6 +5,49 @@ import './index.css';
 import 'katex/dist/katex.min.css';
 
 // Global error logger
+
+const serializeLogValue = (value: unknown): string => {
+  if (value instanceof Error) {
+    const extended = value as Error & { code?: unknown; status?: unknown; cause?: unknown };
+    return JSON.stringify({
+      name: extended.name,
+      message: extended.message,
+      code: extended.code,
+      status: extended.status,
+      cause: extended.cause,
+      stack: extended.stack,
+    });
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    const seen = new WeakSet<object>();
+    try {
+      return JSON.stringify(value, (_key, nestedValue) => {
+        if (nestedValue instanceof Error) {
+          const extended = nestedValue as Error & { code?: unknown; status?: unknown; cause?: unknown };
+          return {
+            name: extended.name,
+            message: extended.message,
+            code: extended.code,
+            status: extended.status,
+            cause: extended.cause,
+            stack: extended.stack,
+          };
+        }
+        if (typeof nestedValue === 'object' && nestedValue !== null) {
+          if (seen.has(nestedValue)) return '[Circular]';
+          seen.add(nestedValue);
+        }
+        return nestedValue;
+      });
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
+};
+
 const sendLog = (level: string, message: string, data?: any) => {
   if (message && (message.includes('/api/log') || message.includes('Failed to fetch') || message.includes('fetch'))) {
     return;
@@ -30,7 +73,7 @@ window.addEventListener('error', (event) => {
 });
 
 window.addEventListener('unhandledrejection', (event) => {
-  const reasonStr = String(event.reason || '');
+  const reasonStr = serializeLogValue(event.reason);
   if (
     reasonStr.includes('AbortError') ||
     reasonStr.includes('The user aborted a request') ||
@@ -39,20 +82,20 @@ window.addEventListener('unhandledrejection', (event) => {
   ) {
     return;
   }
-  sendLog('error', `Unhandled promise rejection: ${event.reason}`);
+  sendLog('error', `Unhandled promise rejection: ${serializeLogValue(event.reason)}`);
 });
 
 const originalConsoleError = console.error;
 console.error = (...args) => {
   originalConsoleError(...args);
-  const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const message = args.map(serializeLogValue).join(' ');
   sendLog('error', `Console error: ${message}`);
 };
 
 const originalConsoleWarn = console.warn;
 console.warn = (...args) => {
   originalConsoleWarn(...args);
-  const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  const message = args.map(serializeLogValue).join(' ');
   sendLog('warn', `Console warn: ${message}`);
 };
 

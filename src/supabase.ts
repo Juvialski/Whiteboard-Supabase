@@ -48,7 +48,15 @@ const fallbackKey = 'supabase-not-configured';
 
 export const supabase = createClient(
   supabaseUrl || fallbackUrl,
-  supabasePublishableKey || fallbackKey
+  supabasePublishableKey || fallbackKey,
+  {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+      flowType: 'pkce',
+    },
+  }
 );
 
 export interface CompatAuthUser {
@@ -102,7 +110,8 @@ class AuthCompat {
   get currentUser(): CompatAuthUser | null { return this.cachedUser; }
   setCurrentUser(user: User | null): void { this.cachedUser = toCompatAuthUser(user); }
   async authStateReady(): Promise<void> {
-    const { data } = await supabase.auth.getSession();
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
     this.cachedUser = toCompatAuthUser(data.session?.user || null);
   }
 }

@@ -29,6 +29,14 @@ Open `http://localhost:3000`.
 
 Read [SUPABASE_SETUP.md](SUPABASE_SETUP.md) for exact dashboard and deployment steps.
 
+## Authentication behavior
+
+- Google OAuth uses Supabase PKCE session restoration.
+- The dashboard does not create anonymous users merely by loading.
+- A guest session is created only after an explicit guest action, such as creating a board or joining a shared link.
+- Concurrent guest requests share one in-flight sign-in, preventing duplicate `/signup` calls.
+- Database work is deferred outside `onAuthStateChange`, preventing OAuth session-lock races.
+
 ## Commands
 
 ```bash
