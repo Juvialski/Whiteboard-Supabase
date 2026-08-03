@@ -821,23 +821,32 @@ export default function Dashboard({
       {/* Main Container */}
       <main className="max-w-7xl w-full mx-auto p-6 md:p-8 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {authError && !isSandboxEnvironment() && (
-          <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-5 flex flex-col md:flex-row items-start justify-between gap-4 shadow-sm animate-pulse">
+          <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-5 flex flex-col md:flex-row items-start justify-between gap-4 shadow-sm">
             <div className="flex-1 space-y-1">
               <h3 className="text-sm font-bold text-amber-800 flex items-center gap-2">
                 <span>⚠️ Anonymous Sign-Ins Are Disabled in Supabase</span>
               </h3>
               <p className="text-xs text-amber-700 leading-relaxed">
-                Guest users need Supabase anonymous sign-ins so every board request has a secure authenticated user ID. Google sign-in remains available.
+                Guest users need Supabase anonymous sign-ins so every board request has a secure authenticated user ID.
               </p>
               <div className="text-xs text-amber-800 mt-2">
                 <strong>To fix this:</strong>
                 <ol className="list-decimal pl-5 mt-1 space-y-0.5 font-medium">
                   <li>Open your <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" className="underline font-bold text-blue-700">Supabase Dashboard</a> and select the project.</li>
-                  <li>Open <strong>Authentication</strong> &rarr; <strong>Providers</strong>.</li>
-                  <li>Enable <strong>Anonymous Sign-Ins</strong>, then save the setting.</li>
+                  <li>Open <strong>Authentication</strong> &rarr; <strong>Providers</strong> &rarr; <strong>Anonymous</strong>.</li>
+                  <li>Toggle <strong>Enable Anonymous Sign-Ins</strong> ON and click <strong>Save</strong>.</li>
                 </ol>
               </div>
             </div>
+            <button
+              onClick={() => {
+                fetchBoards(1);
+              }}
+              className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs rounded-lg shadow-sm transition-colors flex items-center gap-1.5 shrink-0 self-start md:self-center cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Check Again
+            </button>
           </div>
         )}
 
