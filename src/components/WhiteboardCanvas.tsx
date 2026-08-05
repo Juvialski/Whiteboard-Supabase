@@ -943,14 +943,17 @@ export default function WhiteboardCanvas({
   }, []);
 
   // Permission states using getBoardPermissions
-  const permissions = getBoardPermissions(
-    boardData,
-    auth.currentUser ? { uid: auth.currentUser.uid, admin: adminClaim } : null
-  );
+  const activeAuthUser = auth.currentUser
+    ? { uid: auth.currentUser.uid, admin: adminClaim }
+    : currentUser?.id
+      ? { uid: currentUser.id }
+      : null;
+
+  const permissions = getBoardPermissions(boardData, activeAuthUser);
 
   const [showReadOnlyAlert, setShowReadOnlyAlert] = useState(false);
   const alertTimeoutRef = useRef<any>(null);
-  const isTeacher = currentUser.role === "teacher";
+  const isTeacher = currentUser.role === "teacher" || permissions.isOwner || permissions.isAdmin;
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
   const canWrite = isSandboxEnvironment() || permissions.canWrite;
   const canManage = isSandboxEnvironment() || permissions.canManage;

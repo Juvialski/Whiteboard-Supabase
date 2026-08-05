@@ -416,7 +416,17 @@ export async function setDoc(
         p_board_id: ref.id,
         p_patch: data,
       });
-      throwIfError(error);
+      if (error) {
+        console.warn('patch_board RPC error, falling back to direct update:', error.message);
+        const updates: Record<string, any> = {};
+        for (const [key, val] of Object.entries(data)) {
+          const col = BOARD_FIELD_TO_COLUMN[key];
+          if (col) updates[col] = val;
+        }
+        updates.updated_at = Date.now();
+        const { error: directError } = await supabase.from('boards').update(updates).eq('id', ref.id);
+        throwIfError(directError);
+      }
       emitLocalChange(ref.path);
       return;
     }

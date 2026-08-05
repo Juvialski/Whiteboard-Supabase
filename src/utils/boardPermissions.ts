@@ -21,10 +21,14 @@ export function getBoardPermissions(
   boardData: Whiteboard | any,
   authUser: AuthUser | null
 ): BoardPermissions {
+  const studentsCanWrite = boardData?.studentsCanWrite !== false;
+  const accessMode = boardData?.accessMode || 'link-edit';
+  const isExplicitlyViewOnly = accessMode === 'link-view';
+
   if (!authUser || !authUser.uid) {
     return {
-      canRead: false,
-      canWrite: false,
+      canRead: true,
+      canWrite: studentsCanWrite && !isExplicitlyViewOnly,
       canManage: false,
       canDelete: false,
       isOwner: false,
@@ -35,7 +39,7 @@ export function getBoardPermissions(
   const isAdmin = !!authUser.admin;
   const uid = authUser.uid;
   const ownerUid = boardData?.ownerUid || '';
-  const isOwner = ownerUid === uid;
+  const isOwner = Boolean(ownerUid && ownerUid === uid);
 
   if (isAdmin || isOwner) {
     return {
@@ -48,24 +52,15 @@ export function getBoardPermissions(
     };
   }
 
-  const accessMode = boardData?.accessMode || 'private';
   const editorUids: string[] = Array.isArray(boardData?.editorUids) ? boardData.editorUids : [];
   const viewerUids: string[] = Array.isArray(boardData?.viewerUids) ? boardData.viewerUids : [];
-  const studentsCanWrite = boardData?.studentsCanWrite !== false;
 
   const isEditor = editorUids.includes(uid);
   const isViewer = viewerUids.includes(uid);
 
-  const canRead =
-    isEditor ||
-    isViewer ||
-    accessMode === 'link-view' ||
-    accessMode === 'link-edit' ||
-    accessMode === 'public';
+  const canRead = true;
 
-  const canWrite =
-    isEditor ||
-    ((accessMode === 'link-edit' || accessMode === 'public') && studentsCanWrite);
+  const canWrite = isEditor || (!isViewer && !isExplicitlyViewOnly && studentsCanWrite);
 
   return {
     canRead,
