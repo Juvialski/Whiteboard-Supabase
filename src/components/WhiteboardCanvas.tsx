@@ -91,6 +91,7 @@ import Markdown from "react-markdown";
 import WorkspaceTimer from "./WorkspaceTimer";
 import { secureEncrypt, secureDecrypt } from "../utils/crypto";
 import { exportPdfWithDrawings } from "../utils/pdf";
+import { loadBoardRecoveryCache, scheduleBoardRecoveryCacheSave } from "../utils/boardRecoveryCache";
 
 interface CompressedImage {
   base64Str: string;
@@ -104,27 +105,6 @@ interface LaserPoint {
   timestamp: number;
   color: string;
 }
-
-// Safe localStorage setter with automatic cache eviction on quota exceeded
-const safeLocalStorageSet = (key: string, value: string) => {
-  try {
-    localStorage.setItem(key, value);
-  } catch (e: any) {
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith('whiteboard_elements_') && k !== key) {
-          keysToRemove.push(k);
-        }
-      }
-      keysToRemove.forEach((k) => localStorage.removeItem(k));
-      localStorage.setItem(key, value);
-    } catch (_) {
-      // Storage unavailable or completely full, gracefully degrade
-    }
-  }
-};
 
 // Client-side image compression utility to handle high volumes of pasted images safely
 // within Supabase documents without needing Supabase Storage.
@@ -333,23 +313,9 @@ export default function WhiteboardCanvas({
     zoomRef.current = zoom;
   }, [zoom]);
 
-  // Whiteboard Elements State (loads instantly from LocalStorage cache as recovery fallback)
-  const [elements, setElements] = useState<BoardElement[]>(() => {
-    try {
-      const cached = localStorage.getItem(`whiteboard_elements_${boardId}`);
-      if (cached) {
-        const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed)) {
-          return parsed.filter(
-            (el): el is BoardElement => el !== null && el !== undefined && typeof el === "object" && typeof el.id === "string" && typeof el.type === "string"
-          );
-        }
-      }
-    } catch (e) {
-      console.error("Error loading cached elements:", e);
-    }
-    return [];
-  });
+  // Whiteboard state hydrates from Supabase. IndexedDB provides a local recovery
+  // preview without consuming the small localStorage quota required by OAuth.
+  const [elements, setElements] = useState<BoardElement[]>([]);
   
   const [clipboardElements, setClipboardElements] = useState<BoardElement[]>([]);
   const [boardData, setBoardData] = useState<Whiteboard | null>(null);
@@ -387,6 +353,20 @@ export default function WhiteboardCanvas({
     selectedIds: string[];
   }>>({});
   const [wsLatency, setWsLatency] = useState<number | null>(null);
+
+  // Load the complete local recovery snapshot from IndexedDB while the cloud
+  // manifest is hydrating. The authoritative Supabase state replaces it later.
+  useEffect(() => {
+    let cancelled = false;
+    void loadBoardRecoveryCache(boardId).then((cachedElements) => {
+      if (cancelled || isHydratedRef.current || cachedElements.length === 0) return;
+      setElements(cachedElements);
+      elementsRef.current = cachedElements;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId]);
 
   // Load heavy drawings from local IndexedDB cache instantly upon mounting (resilience)
   useEffect(() => {
@@ -523,7 +503,7 @@ export default function WhiteboardCanvas({
                   updated = [...prev, { id: elementId, ...elementData } as BoardElement];
                 }
               }
-              safeLocalStorageSet(`whiteboard_elements_${boardId}`, JSON.stringify(updated));
+              scheduleBoardRecoveryCacheSave(boardId, updated);
               return updated;
             });
           } else if (msg.type === "element_focus") {
@@ -1647,12 +1627,13 @@ export default function WhiteboardCanvas({
     setElements(updatedElements);
     elementsRef.current = updatedElements;
 
-    // Save fallback cache to localStorage and IndexedDB
+    // Keep recovery data in IndexedDB. Full board snapshots must never be stored
+    // in localStorage because they can block Supabase OAuth PKCE state writes.
     try {
       if (isSandboxEnvironment()) {
         saveSandboxLocalElements(boardId, updatedElements);
       } else {
-        safeLocalStorageSet(`whiteboard_elements_${boardId}`, JSON.stringify(updatedElements));
+        scheduleBoardRecoveryCacheSave(boardId, updatedElements);
       }
       if (isDrawing) {
         const fullDrawings = updatedElements.filter(el => el.type === 'drawing') as DrawingElement[];
@@ -3130,7 +3111,7 @@ export default function WhiteboardCanvas({
       }
 
       setElements(updatedList);
-      safeLocalStorageSet(`whiteboard_elements_${boardId}`, JSON.stringify(updatedList));
+      scheduleBoardRecoveryCacheSave(boardId, updatedList);
 
       hasUnsavedChanges.current = true;
       setSyncStatus('saved-local');
@@ -3452,7 +3433,7 @@ export default function WhiteboardCanvas({
       if (isSandboxEnvironment()) {
         saveSandboxLocalElements(boardId, elementsToKeep);
       } else {
-        localStorage.setItem(`whiteboard_elements_${boardId}`, JSON.stringify(elementsToKeep));
+        scheduleBoardRecoveryCacheSave(boardId, elementsToKeep);
       }
     } catch (e) {
       console.error(e);

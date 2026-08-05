@@ -1,4 +1,5 @@
 import { createClient, type User } from '@supabase/supabase-js';
+import { evictLegacyBoardCachesFromLocalStorage } from './utils/boardRecoveryCache';
 
 const getStoredUrl = (): string => {
   if (typeof window === 'undefined') return '';
@@ -43,6 +44,24 @@ export function clearSupabaseConfig(): void {
   }
 }
 
+
+const resilientAuthStorage = typeof window === 'undefined'
+  ? undefined
+  : {
+      getItem: (key: string) => localStorage.getItem(key),
+      setItem: (key: string, value: string) => {
+        try {
+          localStorage.setItem(key, value);
+        } catch (error) {
+          // Old app versions stored complete board snapshots in localStorage.
+          // Free that space and retry so PKCE can persist its code verifier.
+          evictLegacyBoardCachesFromLocalStorage();
+          localStorage.setItem(key, value);
+        }
+      },
+      removeItem: (key: string) => localStorage.removeItem(key),
+    };
+
 const fallbackUrl = 'http://127.0.0.1:54321';
 const fallbackKey = 'supabase-not-configured';
 
@@ -55,6 +74,7 @@ export const supabase = createClient(
       autoRefreshToken: true,
       detectSessionInUrl: true,
       flowType: 'pkce',
+      storage: resilientAuthStorage,
     },
   }
 );

@@ -13,3 +13,12 @@ This version changes the flow as follows:
 - Error logging now preserves Auth error `message`, `code`, and `status` instead of displaying `{}`.
 
 No database schema change is required for this fix. Keep Google and Anonymous providers enabled, retain the existing redirect URLs, redeploy the application, and test in a private/incognito window.
+
+## LocalStorage quota / PKCE fix
+
+- Full board recovery snapshots no longer use localStorage.
+- Recovery snapshots now use IndexedDB with a debounced writer.
+- Old `whiteboard_elements_*` keys are migrated to IndexedDB before Google OAuth.
+- Stale Supabase PKCE flow keys are removed before starting a new OAuth flow.
+- Supabase Auth uses a resilient storage adapter that frees obsolete board cache entries if a quota error still occurs.
+- The app's OAuth intent marker uses sessionStorage.

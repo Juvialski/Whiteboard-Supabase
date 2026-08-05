@@ -11,6 +11,7 @@ This repository uses a fresh Supabase backend. It does not read, migrate, or dep
 - Private Supabase Storage for images, audio, signatures, and PDF pages
 - The existing Node WebSocket relay for cursors, drawing previews, live element updates, and shard-change notifications
 - IndexedDB recovery for unflushed local mutations
+- IndexedDB board recovery cache; full board snapshots are never stored in localStorage
 
 ## Start here
 

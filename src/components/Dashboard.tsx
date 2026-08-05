@@ -7,6 +7,7 @@ import SupabaseSettingsModal from './SupabaseSettingsModal';
 import { isSandboxEnvironment, getSandboxLocalBoards, saveSandboxLocalBoards, saveSandboxLocalElements } from '../utils/sandboxGuard';
 import { trackOperation } from '../utils/databaseInstrumentation';
 import { getBoardPermissions } from '../utils/boardPermissions';
+import { deleteBoardRecoveryCache } from '../utils/boardRecoveryCache';
 
 interface DashboardProps {
   onSelectBoard: (boardId: string, profile: UserProfile, boardName?: string) => void;
@@ -473,13 +474,35 @@ export default function Dashboard({
       setAuthError(null);
 
       const requestedLimit = PAGE_SIZE + 1;
-      const { data, error } = await supabase.rpc('list_my_boards', {
+      let rows: any[] = [];
+
+      // Try RPC stored function first
+      const { data: rpcData, error: rpcError } = await supabase.rpc('list_my_boards', {
         p_limit: requestedLimit,
         p_offset: (page - 1) * PAGE_SIZE,
       });
-      if (error) throw new Error(error.message);
 
-      const rows = Array.isArray(data) ? data : [];
+      if (!rpcError && Array.isArray(rpcData)) {
+        rows = rpcData;
+      } else {
+        // Fallback to direct boards table query if RPC is missing in schema cache
+        console.warn('RPC list_my_boards unavailable, trying direct boards table query:', rpcError?.message);
+        
+        const { data: tableData, error: tableError } = await supabase
+          .from('boards')
+          .select('*')
+          .eq('status', 'ready')
+          .order('created_at', { ascending: false })
+          .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+
+        if (!tableError && Array.isArray(tableData)) {
+          rows = tableData;
+        } else {
+          // If both fail, throw error so user gets clear setup instructions
+          throw new Error(rpcError?.message || tableError?.message || 'Failed to fetch whiteboards.');
+        }
+      }
+
       const loadedBoards = rows.slice(0, PAGE_SIZE).map((row: any) => ({
         ...(row.data || {}),
         id: row.id,
@@ -693,6 +716,7 @@ export default function Dashboard({
     if (isSandboxEnvironment()) {
       saveSandboxLocalBoards(getSandboxLocalBoards().filter((board) => board.id !== targetId));
       localStorage.removeItem(`lucid_spark_board_elements_${targetId}`);
+      await deleteBoardRecoveryCache(targetId);
       return;
     }
 
@@ -700,6 +724,7 @@ export default function Dashboard({
       const { deleteAllBoardAssets } = await import('../services/storageService');
       await deleteAllBoardAssets(targetId);
       await deleteDoc(doc(db, 'whiteboards', targetId));
+      await deleteBoardRecoveryCache(targetId);
       forgetBoardId(targetId);
       trackOperation('delete', 'supabase-board-delete-cascade', 1);
     } catch (err) {
@@ -828,26 +853,47 @@ export default function Dashboard({
       <main className="max-w-7xl w-full mx-auto p-6 md:p-8 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {authError && !isSandboxEnvironment() && (
           <div className="col-span-full bg-amber-50 border border-amber-200 rounded-xl p-5 flex flex-col md:flex-row items-start justify-between gap-4 shadow-sm">
-            <div className="flex-1 space-y-1">
+            <div className="flex-1 space-y-2">
               <h3 className="text-sm font-bold text-amber-800 flex items-center gap-2">
-                <span>⚠️ Supabase Session or Board List Error</span>
+                <span>⚠️ Supabase Schema or Session Notice</span>
               </h3>
-              <p className="text-xs text-amber-700 leading-relaxed">
+              <p className="text-xs text-amber-700 leading-relaxed font-mono bg-amber-100/50 p-2 rounded border border-amber-200/60">
                 {authError}
               </p>
-              <p className="text-xs text-amber-800 mt-2 font-medium">
-                Google sign-in and guest sign-in are handled separately. This message no longer assumes the Anonymous provider is disabled.
-              </p>
+              {authError.includes('function public.list_my_boards') || authError.includes('schema cache') || authError.includes('does not exist') ? (
+                <div className="text-xs text-amber-900 bg-amber-100/80 p-3 rounded-lg border border-amber-200/80 space-y-1.5">
+                  <p className="font-semibold text-amber-900 flex items-center gap-1.5">
+                    💡 How to Fix: Run Schema SQL in Supabase
+                  </p>
+                  <p className="text-amber-800 leading-relaxed">
+                    The Supabase project database needs its initial tables and stored functions.
+                    Click <strong>Supabase Config</strong> in the top header to copy <code>supabase-schema.sql</code>, then run it in your <strong>Supabase Dashboard → SQL Editor</strong>.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-amber-800 font-medium">
+                  Google sign-in and guest sign-in are handled separately. Check your network connection or project API credentials.
+                </p>
+              )}
             </div>
-            <button
-              onClick={() => {
-                fetchBoards(1);
-              }}
-              className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs rounded-lg shadow-sm transition-colors flex items-center gap-1.5 shrink-0 self-start md:self-center cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              Check Again
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2 shrink-0 self-start md:self-center">
+              <button
+                onClick={() => setIsSupabaseSettingsOpen(true)}
+                className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-medium text-xs rounded-lg shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Database className="w-3.5 h-3.5" />
+                Supabase Config
+              </button>
+              <button
+                onClick={() => {
+                  fetchBoards(1);
+                }}
+                className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white font-medium text-xs rounded-lg shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Check Again
+              </button>
+            </div>
           </div>
         )}
 

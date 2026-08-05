@@ -344,14 +344,40 @@ async function fetchBoardAndAllShards(control: BoardControl): Promise<void> {
   control.loadState = 'loading-manifest';
   notify(control);
 
+  let boardRow: any = null;
+  let shardRows: any[] = [];
+
   const { data: statePayload, error: stateError } = await supabase.rpc('get_board_state', {
     p_board_id: control.boardId,
   });
-  if (stateError) throw stateError;
 
-  const payload = statePayload as any;
-  const boardRow = payload?.board;
-  const shardRows = Array.isArray(payload?.shards) ? payload.shards : [];
+  if (!stateError && statePayload) {
+    const payload = statePayload as any;
+    boardRow = payload?.board;
+    shardRows = Array.isArray(payload?.shards) ? payload.shards : [];
+  } else {
+    // Fallback to direct table queries if get_board_state RPC function is missing
+    console.warn('RPC get_board_state unavailable, trying direct table select:', stateError?.message);
+    const { data: bData, error: bError } = await supabase
+      .from('boards')
+      .select('*')
+      .eq('id', control.boardId)
+      .maybeSingle();
+
+    if (bError || !bData) {
+      throw bError || new Error('Board not found or access denied.');
+    }
+    boardRow = bData;
+
+    const { data: sData, error: sError } = await supabase
+      .from('board_shards')
+      .select('*')
+      .eq('board_id', control.boardId);
+
+    if (sError) throw sError;
+    shardRows = sData || [];
+  }
+
   if (!boardRow) throw new Error('Board not found or access denied.');
 
   control.boardData = mapBoardRow(boardRow);

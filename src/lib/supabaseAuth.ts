@@ -1,4 +1,5 @@
 import { auth, googleProvider, supabase, toCompatAuthUser, type CompatAuthUser } from '../supabase';
+import { migrateLegacyBoardCachesToIndexedDb } from '../utils/boardRecoveryCache';
 
 export type Unsubscribe = () => void;
 
@@ -17,13 +18,13 @@ function defer(callback: () => void): void {
 
 function markOAuthIntent(): void {
   if (typeof window !== 'undefined') {
-    localStorage.setItem(OAUTH_INTENT_KEY, String(Date.now()));
+    sessionStorage.setItem(OAUTH_INTENT_KEY, String(Date.now()));
   }
 }
 
 export function clearOAuthIntent(): void {
   if (typeof window !== 'undefined') {
-    localStorage.removeItem(OAUTH_INTENT_KEY);
+    sessionStorage.removeItem(OAUTH_INTENT_KEY);
   }
 }
 
@@ -40,7 +41,7 @@ export function isOAuthFlowInProgress(): boolean {
     return true;
   }
 
-  const startedAt = Number(localStorage.getItem(OAUTH_INTENT_KEY) || 0);
+  const startedAt = Number(sessionStorage.getItem(OAUTH_INTENT_KEY) || 0);
   if (!startedAt || Date.now() - startedAt > OAUTH_INTENT_MAX_AGE_MS) {
     clearOAuthIntent();
     return false;
@@ -147,6 +148,9 @@ export async function signInWithPopup(
   _auth: typeof auth,
   _provider: typeof googleProvider
 ): Promise<void> {
+  // Free legacy full-board localStorage snapshots before Supabase PKCE stores
+  // its temporary code verifier. The data is moved to IndexedDB first.
+  await migrateLegacyBoardCachesToIndexedDb();
   markOAuthIntent();
 
   try {
