@@ -416,22 +416,23 @@ export async function setDoc(
         p_board_id: ref.id,
         p_patch: data,
       });
-      if (error) {
-        console.warn('patch_board RPC error, falling back to direct update:', error.message);
-        const updates: Record<string, any> = {};
-        for (const [key, val] of Object.entries(data)) {
-          const col = BOARD_FIELD_TO_COLUMN[key];
-          if (col) updates[col] = val;
-        }
-        updates.updated_at = Date.now();
-        const { error: directError } = await supabase.from('boards').update(updates).eq('id', ref.id);
-        throwIfError(directError);
-      }
+      throwIfError(error);
       emitLocalChange(ref.path);
       return;
     }
-    const row = boardRowFromData(ref.id, data);
-    const { error } = await supabase.from('boards').upsert(row, { onConflict: 'id' });
+
+    // Board creation is intentionally routed through the hardened RPC.
+    // Direct INSERT/UPSERT access to public.boards is revoked by the security migration.
+    const { error } = await supabase.rpc('create_board', {
+      p_board_id: ref.id,
+      p_name: String(data.name || 'Untitled Board'),
+      p_description: String(data.description || ''),
+      p_created_by: String(data.createdBy || 'User'),
+      p_student_id: String(data.studentId || ''),
+      p_student_name: String(data.studentName || ''),
+      p_students_can_write: data.studentsCanWrite !== false,
+      p_status: data.status === 'initializing' ? 'initializing' : 'ready',
+    });
     throwIfError(error);
     emitLocalChange(ref.path);
     return;
