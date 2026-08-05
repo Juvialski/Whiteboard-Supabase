@@ -21,14 +21,36 @@ export function getBoardPermissions(
   boardData: Whiteboard | any,
   authUser: AuthUser | null
 ): BoardPermissions {
+  const effectivePermission = String(
+    boardData?.effectivePermission || boardData?.effective_permission || ''
+  ).toLowerCase();
+
+  // The hardened get_board_state RPC returns the effective permission after RLS
+  // and membership checks. When present, it is the only authority used by the UI.
+  if (effectivePermission) {
+    const canRead = ['viewer', 'editor', 'owner', 'admin'].includes(effectivePermission);
+    const canWrite = boardData?.effectiveCanWrite === true || boardData?.effective_can_write === true;
+    const canManage = boardData?.effectiveCanManage === true || boardData?.effective_can_manage === true;
+    return {
+      canRead,
+      canWrite,
+      canManage,
+      canDelete: canManage,
+      isOwner: effectivePermission === 'owner',
+      isAdmin: effectivePermission === 'admin',
+    };
+  }
+
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
-  const accessMode = boardData?.accessMode || 'link-edit';
+  const accessMode = boardData?.accessMode || 'private';
   const isExplicitlyViewOnly = accessMode === 'link-view';
 
-  if (!authUser || !authUser.uid) {
+  // Deny while the secure board manifest is unresolved. This prevents guests
+  // from making edits that look successful locally but are rejected by Supabase.
+  if (!boardData || !authUser || !authUser.uid) {
     return {
-      canRead: true,
-      canWrite: studentsCanWrite && !isExplicitlyViewOnly,
+      canRead: false,
+      canWrite: false,
       canManage: false,
       canDelete: false,
       isOwner: false,
@@ -58,9 +80,9 @@ export function getBoardPermissions(
   const isEditor = editorUids.includes(uid);
   const isViewer = viewerUids.includes(uid);
 
-  const canRead = true;
+  const canRead = isOwner || isAdmin || isEditor || isViewer;
 
-  const canWrite = isEditor || (!isViewer && !isExplicitlyViewOnly && studentsCanWrite);
+  const canWrite = isEditor && !isExplicitlyViewOnly && studentsCanWrite;
 
   return {
     canRead,

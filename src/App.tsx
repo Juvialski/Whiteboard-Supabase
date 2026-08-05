@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { doc, setDoc, onSnapshot } from './lib/supabaseDb';
-import { db, auth, googleProvider, isSupabaseConfigured } from './supabase';
+import { db, auth, googleProvider, isSupabaseConfigured, supabase } from './supabase';
 import { onAuthStateChanged, signInWithPopup, signOut } from './lib/supabaseAuth';
 import { UserProfile } from './types';
 import Dashboard from './components/Dashboard';
@@ -27,13 +27,60 @@ export default function App() {
 
   // Quick link join variables
   const [linkBoardId, setLinkBoardId] = useState<string | null>(null);
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const shareRedemptionPromiseRef = useRef<Promise<{ boardId: string; name: string }> | null>(null);
   const [nicknameInput, setNicknameInput] = useState('');
   const [colorInput, setColorInput] = useState(COLLABORATOR_COLORS[Math.floor(Math.random() * COLLABORATOR_COLORS.length)]);
+
+
+  const redeemShareAndJoin = async (
+    token: string,
+    activeProfile: UserProfile
+  ): Promise<{ boardId: string; name: string }> => {
+    if (!shareRedemptionPromiseRef.current) {
+      shareRedemptionPromiseRef.current = (async () => {
+        const normalizedToken = token.trim();
+        if (normalizedToken.length < 32 || normalizedToken.length > 256) {
+          throw new Error('This sharing link is invalid or incomplete.');
+        }
+
+        const { data, error } = await supabase.rpc('redeem_board_share_link', {
+          p_raw_token: normalizedToken,
+        });
+        if (error) throw new Error(error.message);
+
+        const payload = data as any;
+        const redeemedBoardId = String(payload?.boardId || payload?.board_id || '');
+        const redeemedBoardName = String(payload?.name || 'Collaborative Whiteboard');
+        if (!redeemedBoardId) throw new Error('The sharing link did not return a board.');
+
+        return { boardId: redeemedBoardId, name: redeemedBoardName };
+      })();
+    }
+
+    try {
+      const result = await shareRedemptionPromiseRef.current;
+      setProfile(activeProfile);
+      setBoardId(result.boardId);
+      setBoardName(result.name);
+      setShareToken(null);
+      setLinkBoardId(null);
+
+      // The secret is needed only once. The persisted Supabase session and
+      // board_members row are enough for later reloads in the same browser.
+      const cleanUrl = `${window.location.origin}/?board=${encodeURIComponent(result.boardId)}`;
+      window.history.replaceState({ path: cleanUrl }, '', cleanUrl);
+      return result;
+    } finally {
+      shareRedemptionPromiseRef.current = null;
+    }
+  };
 
   useEffect(() => {
     // Check if joining via shareable link parameter
     const params = new URLSearchParams(window.location.search);
     const urlBoardId = params.get('board');
+    const rawShareToken = params.get('share');
 
     // Subscribe to Supabase authentication changes
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -77,7 +124,16 @@ export default function App() {
             setAdminClaim(false);
           });
 
-        if (urlBoardId) {
+        if (rawShareToken) {
+          if (user.isAnonymous && !savedName) {
+            setShareToken(rawShareToken);
+          } else {
+            void redeemShareAndJoin(rawShareToken, activeProfile).catch((error) => {
+              console.error('Unable to redeem shared board link:', error);
+              alert(`Unable to open this sharing link: ${error instanceof Error ? error.message : String(error)}`);
+            });
+          }
+        } else if (urlBoardId) {
           joinBoardDirectly(urlBoardId, activeProfile);
         }
       } else {
@@ -85,7 +141,11 @@ export default function App() {
         // Not logged in (guest / anonymous mode)
         const savedName = localStorage.getItem('lucid_spark_user_name');
         
-        if (savedName) {
+        if (rawShareToken) {
+          // A secure share token is redeemed only after an authenticated Google
+          // or anonymous Supabase session exists. Ask for the guest nickname first.
+          setShareToken(rawShareToken);
+        } else if (savedName) {
           const savedId = localStorage.getItem('lucid_spark_user_id') || 'u-' + Math.floor(Math.random() * 1000000);
           const savedColor = localStorage.getItem('lucid_spark_user_color') || colorInput;
           const savedRole = (localStorage.getItem('lucid_spark_user_role') || 'student') as 'student' | 'teacher';
@@ -106,7 +166,8 @@ export default function App() {
             joinBoardDirectly(urlBoardId, activeProfile);
           }
         } else if (urlBoardId) {
-          // Direct link join but guest needs to enter their nickname
+          // A board-id URL works only for a user who already redeemed a secure
+          // link or was explicitly added as a member.
           setLinkBoardId(urlBoardId);
         }
       }
@@ -284,7 +345,7 @@ export default function App() {
 
   const handleLinkJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nicknameInput.trim() || !linkBoardId) return;
+    if (!nicknameInput.trim() || (!shareToken && !linkBoardId)) return;
 
     const savedId = localStorage.getItem('lucid_spark_user_id') || 'u-' + Math.floor(Math.random() * 1000000);
     const savedRole = (localStorage.getItem('lucid_spark_user_role') || 'student') as 'student' | 'teacher';
@@ -311,11 +372,15 @@ export default function App() {
         localStorage.setItem('lucid_spark_user_id', authenticated.uid);
       }
       setProfile(userProfile);
-      await joinBoardDirectly(linkBoardId, userProfile);
-      setLinkBoardId(null);
+      if (shareToken) {
+        await redeemShareAndJoin(shareToken, userProfile);
+      } else if (linkBoardId) {
+        await joinBoardDirectly(linkBoardId, userProfile);
+        setLinkBoardId(null);
+      }
     } catch (error) {
       console.error('Unable to join shared board:', error);
-      alert('Unable to join this board. Check the Supabase configuration and board permissions.');
+      alert(`Unable to join this board: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -418,7 +483,7 @@ export default function App() {
   }
 
   // If joining via link directly but needs to set their profile details
-  if (linkBoardId) {
+  if (linkBoardId || shareToken) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 font-sans">
         <div className="max-w-md w-full bg-white rounded-3xl border border-slate-200 shadow-xl p-8 space-y-6 text-center relative overflow-hidden">

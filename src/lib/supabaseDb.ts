@@ -200,6 +200,9 @@ function mapBoardRow(row: any): Record<string, any> {
     changedShardIds: row.changed_shard_ids || [],
     deletedShardIds: row.deleted_shard_ids || [],
     totalElements: Number(row.total_elements || 0),
+    effectivePermission: row.effective_permission || null,
+    effectiveCanWrite: row.effective_can_write === true,
+    effectiveCanManage: row.effective_can_manage === true,
   };
 }
 

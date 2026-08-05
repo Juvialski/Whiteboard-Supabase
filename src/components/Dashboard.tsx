@@ -767,25 +767,39 @@ export default function Dashboard({
   const copyLink = async (board: Whiteboard, event: React.MouseEvent) => {
     event.stopPropagation();
     try {
-      if (!isSandboxEnvironment()) {
-        if (board.ownerUid === auth.currentUser?.uid) {
-          const accessMode = board.studentsCanWrite === false ? 'link-view' : 'link-edit';
-          await setDoc(doc(db, 'whiteboards', board.id), {
-            accessMode,
-            updatedAt: Date.now(),
-          }, { merge: true });
-          setBoards((current) => current.map((item) => item.id === board.id ? { ...item, accessMode } : item));
-        } else if (!['link-view', 'link-edit', 'public'].includes(board.accessMode || 'private')) {
-          throw new Error('Only the owner can enable link access for a private board.');
+      let link: string;
+
+      if (isSandboxEnvironment()) {
+        link = `${window.location.origin}/?board=${encodeURIComponent(board.id)}`;
+      } else {
+        if (board.ownerUid !== auth.currentUser?.uid && !adminClaim) {
+          throw new Error('Only the board owner or an administrator can create sharing links.');
         }
+
+        const shareRole = board.studentsCanWrite === false ? 'viewer' : 'editor';
+        const { data, error } = await supabase.rpc('create_board_share_link', {
+          p_board_id: board.id,
+          p_role: shareRole,
+          p_expires_at: null,
+        });
+        if (error) throw new Error(error.message);
+
+        const payload = data as any;
+        const rawToken = String(payload?.rawToken || payload?.raw_token || '');
+        if (!rawToken) throw new Error('Supabase did not return a sharing token.');
+
+        link = `${window.location.origin}/?share=${encodeURIComponent(rawToken)}`;
+        setBoards((current) => current.map((item) =>
+          item.id === board.id ? { ...item, accessMode: 'shared' } : item
+        ));
       }
-      const link = `${window.location.origin}/?board=${board.id}`;
+
       await navigator.clipboard.writeText(link);
       setCopiedId(board.id);
       setTimeout(() => setCopiedId(null), 2000);
     } catch (error) {
       console.error('Unable to create share link:', error);
-      alert('Could not create the share link. Only the board owner can enable link access.');
+      alert(`Could not create the share link: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

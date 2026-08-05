@@ -121,6 +121,9 @@ function mapBoardRow(row: any): any {
     changedShardIds: row.changed_shard_ids || [],
     deletedShardIds: row.deleted_shard_ids || [],
     totalElements: Number(row.total_elements || 0),
+    effectivePermission: row.effective_permission || null,
+    effectiveCanWrite: row.effective_can_write === true,
+    effectiveCanManage: row.effective_can_manage === true,
   };
 }
 
@@ -129,7 +132,7 @@ function shardMapFromRow(row: any): Map<string, BoardElement> {
   const elements = row?.elements || {};
   for (const [id, raw] of Object.entries(elements)) {
     if (!raw || typeof raw !== 'object' || (raw as any).isDeleted) continue;
-    result.set(id, { id, ...(raw as any) } as BoardElement);
+    result.set(id, { ...(raw as any), id } as BoardElement);
   }
   return result;
 }
