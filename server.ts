@@ -1,122 +1,180 @@
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import path from "path";
+import { access } from "fs/promises";
+import { constants as fsConstants } from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import http from "http";
-import { WebSocketServer, WebSocket } from "ws";
-import fsUtils from "fs";
+import { createClient } from "@supabase/supabase-js";
+import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { GoogleGenAI, Type } from "@google/genai";
 
 dotenv.config();
 
-// Simple file logger
-const logFile = path.join(process.cwd(), 'app-events.log');
-function logToFile(level: string, message: string, data: any = null) {
-  const timestamp = new Date().toISOString();
-  let logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
-  if (data) {
-    try {
-      logLine += ' ' + (typeof data === 'object' ? JSON.stringify(data) : String(data));
-    } catch (e) {
-      logLine += ' [unserializable data]';
-    }
-  }
-  logLine += '\n';
-  
-  // Also log to console
-  if (level === 'error') console.error(logLine.trim());
-  else console.log(logLine.trim());
-
-  try {
-    fsUtils.appendFileSync(logFile, logLine);
-  } catch (e) {
-    console.error("Failed to write to log file:", e);
-  }
-}
-
 const app = express();
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT) || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "").trim();
+const SUPABASE_KEY = (
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  ""
+).trim();
+const APP_ORIGINS = new Set(
+  (process.env.APP_ORIGIN || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
-
+const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
 const rooms = new Map<string, Set<WebSocket>>();
+const connectionsByIp = new Map<string, number>();
+let isShuttingDown = false;
 
+const SHAPES = new Set([
+  "any", "rounded-rect", "circle", "star", "badge", "diamond", "banner",
+  "hexagon", "ribbon", "heart", "shield", "crest",
+]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "ping"]);
+const WRITER_EVENTS = new Set([
+  ...VIEWER_EVENTS,
+  "drawing_stream", "drawing_stream_end", "element_update", "timer_sync",
+  "request_follow", "stop_follow", "board_manifest_changed",
+]);
+const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus"]);
+const MAX_ROOM_CLIENTS = 20;
+const MAX_CONNECTIONS_PER_IP = 12;
+const MAX_USER_CONNECTIONS_PER_ROOM = 4;
+const BACKPRESSURE_LIMIT = 512 * 1024;
 
+type SocketPermission = "viewer" | "editor" | "owner" | "admin";
+interface SocketContext {
+  authenticated: boolean;
+  authenticating: boolean;
+  userId: string | null;
+  boardId: string | null;
+  permission: SocketPermission | null;
+  canWrite: boolean;
+  canManage: boolean;
+  accessToken: string | null;
+  lastAuthorizationCheck: number;
+  authorizationRefresh: Promise<boolean> | null;
+  remoteKey: string;
+  released: boolean;
+  isAlive: boolean;
+  authTimer: ReturnType<typeof setTimeout> | null;
+  rateWindows: Map<string, { startedAt: number; count: number }>;
+}
+const socketContexts = new WeakMap<WebSocket, SocketContext>();
 
+function safeErrorLabel(error: unknown): string {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return message
+    .replace(/bearer\s+[a-z0-9._-]+/gi, "Bearer [REDACTED]")
+    .replace(/(token|authorization|apikey|secret|password|cookie|session)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .slice(0, 500);
+}
 
-// Set up body parser with large limit for pasting images / elements
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-
-// Log API (client can send logs here)
-app.post("/api/log", (req, res) => {
-  if (!req.body) {
-    return res.json({ success: false, error: "No body" });
+function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), geolocation=(), payment=(), usb=()");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (IS_PRODUCTION) {
+    res.setHeader(
+      "Content-Security-Policy",
+      [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "script-src 'self' https://challenges.cloudflare.com",
+        "frame-src https://challenges.cloudflare.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "img-src 'self' data: blob: https://*.supabase.co",
+        "media-src 'self' data: blob: https://*.supabase.co",
+        "connect-src 'self' https://*.supabase.co https://challenges.cloudflare.com wss://*.supabase.co wss: ws:",
+        "worker-src 'self' blob:",
+      ].join("; "),
+    );
   }
-  const { level, message, data } = req.body;
-  logToFile(level || 'info', message || 'No message', data);
-  res.json({ success: true });
-});
+  next();
+}
+app.use(securityHeaders);
 
-// View logs API
-app.get("/api/logs", (req, res) => {
-  try {
-    if (fsUtils.existsSync(logFile)) {
-      const content = fsUtils.readFileSync(logFile, 'utf8');
-      res.type('text/plain').send(content);
-    } else {
-      res.type('text/plain').send("No logs yet.");
+interface RateEntry { startedAt: number; count: number }
+function rateLimit(options: { windowMs: number; max: number }) {
+  const entries = new Map<string, RateEntry>();
+  const cleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of entries) if (now - entry.startedAt > options.windowMs * 2) entries.delete(key);
+  }, Math.max(30_000, options.windowMs));
+  cleanup.unref();
+
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const key = req.ip || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const current = entries.get(key);
+    const entry = !current || now - current.startedAt >= options.windowMs
+      ? { startedAt: now, count: 0 }
+      : current;
+    entry.count += 1;
+    entries.set(key, entry);
+    if (entry.count > options.max) {
+      res.setHeader("Retry-After", String(Math.ceil((options.windowMs - (now - entry.startedAt)) / 1000)));
+      res.status(429).json({ success: false, error: "Too many requests" });
+      return;
     }
-  } catch (e) {
-    res.status(500).send("Error reading logs: " + e.message);
-  }
-});
+    next();
+  };
+}
+const generalApiLimiter = rateLimit({ windowMs: 60_000, max: 120 });
+const aiLimiter = rateLimit({ windowMs: 60_000, max: 10 });
 
-// AI Stamp Generation API
-app.post("/api/ai/stamp", async (req, res) => {
+app.get("/healthz", (_req, res) => res.status(200).json({ status: "ok" }));
+app.head("/healthz", (_req, res) => res.sendStatus(200));
+app.use("/api", generalApiLimiter);
+
+app.post("/api/ai/stamp", aiLimiter, express.json({ limit: "32kb", strict: true }), async (req, res) => {
   try {
-    const { prompt, preferredShape, count } = req.body;
-    // Check user provided API key from body or header
-    const userApiKey = req.body.apiKey || (req.headers["x-gemini-api-key"] as string);
-
-    if (!userApiKey || !userApiKey.trim()) {
-      return res.status(400).json({
-        success: false,
-        error: "API key required",
-        message: "AI Stamp Generation requires your Google AI Studio API key.",
-        apiKeyUrl: "https://aistudio.google.com/app/apikey"
-      });
+    const rawPrompt = req.body?.prompt;
+    const rawShape = req.body?.preferredShape;
+    const rawCount = req.body?.count;
+    const rawApiKey = req.body?.apiKey ?? req.headers["x-gemini-api-key"];
+    const allowedKeys = new Set(["prompt", "preferredShape", "count", "apiKey"]);
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) || Object.keys(req.body).some((key) => !allowedKeys.has(key))) {
+      return res.status(400).json({ success: false, error: "Invalid request body" });
+    }
+    if (rawPrompt !== undefined && typeof rawPrompt !== "string") return res.status(400).json({ success: false, error: "Invalid prompt" });
+    const prompt = (rawPrompt || "Educational praise and feedback stamps for students").trim();
+    if (!prompt || prompt.length > 500) return res.status(400).json({ success: false, error: "Prompt must contain between 1 and 500 characters" });
+    const preferredShape = typeof rawShape === "string" ? rawShape : "any";
+    if (!SHAPES.has(preferredShape)) return res.status(400).json({ success: false, error: "Invalid preferred shape" });
+    const parsedCount = Number(rawCount ?? 4);
+    if (!Number.isFinite(parsedCount) || parsedCount < 1 || parsedCount > 6) return res.status(400).json({ success: false, error: "Stamp count must be between 1 and 6" });
+    const numStamps = Math.trunc(parsedCount);
+    if (typeof rawApiKey !== "string" || !rawApiKey.trim() || rawApiKey.length > 512) {
+      return res.status(400).json({ success: false, error: "API key required", message: "AI Stamp Generation requires your Google AI Studio API key." });
     }
 
-    const ai = new GoogleGenAI({
-      apiKey: userApiKey.trim(),
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build"
-        }
-      }
-    });
-
-    const numStamps = Math.min(Math.max(Number(count) || 4, 1), 6);
-    const shapeConstraint = preferredShape && preferredShape !== "any" 
-      ? `Preferred shape for all stamps is "${preferredShape}".` 
+    const ai = new GoogleGenAI({ apiKey: rawApiKey.trim(), httpOptions: { headers: { "User-Agent": "whiteboard-free-tier" } } });
+    const shapeConstraint = preferredShape !== "any"
+      ? `Preferred shape for all stamps is "${preferredShape}".`
       : `Vary shapes across: "rounded-rect", "circle", "star", "badge", "diamond", "banner", "hexagon", "ribbon", "heart", "shield", "crest".`;
-
     const systemInstruction = `You are a creative educational and classroom feedback stamp generator.
-Given a user prompt or topic, generate ${numStamps} unique, visually distinct stamp design concepts.
-For each stamp, provide:
-1. "label": Punchy 1-3 word text (e.g., "Space Ace", "Quantum Math", "Top Effort", "Lab Approved").
-2. "emoji": Single, highly relevant emoji (e.g., "🚀", "⚛️", "🌟", "🏆", "🧠").
-3. "color": Pastel hex color (e.g., "#bfdbfe", "#fbcfe8", "#bbf7d0", "#e9d5ff", "#fef08a", "#99f6e4", "#fed7aa", "#fecaca").
-4. "shape": One of "rounded-rect", "circle", "star", "badge", "diamond", "banner", "hexagon", "ribbon", "heart", "shield", "crest".
-5. "description": Short 1-sentence tip on when to award this stamp.
-
-${shapeConstraint}`;
-
+Generate ${numStamps} unique stamp concepts. Return label, one emoji, pastel hex color, an allowed shape, and a short description. ${shapeConstraint}`;
     const response = await ai.models.generateContent({
       model: "gemini-3.6-flash",
-      contents: prompt || "Educational praise and feedback stamps for students",
+      contents: prompt,
       config: {
         systemInstruction,
         responseMimeType: "application/json",
@@ -125,126 +183,444 @@ ${shapeConstraint}`;
           items: {
             type: Type.OBJECT,
             properties: {
-              label: { type: Type.STRING },
-              emoji: { type: Type.STRING },
-              color: { type: Type.STRING },
-              shape: { type: Type.STRING },
-              description: { type: Type.STRING }
+              label: { type: Type.STRING }, emoji: { type: Type.STRING }, color: { type: Type.STRING },
+              shape: { type: Type.STRING }, description: { type: Type.STRING },
             },
-            required: ["label", "emoji", "color", "shape"]
-          }
-        }
-      }
+            required: ["label", "emoji", "color", "shape"],
+          },
+        },
+      },
     });
-
-    const jsonText = response.text || "[]";
-    const stamps = JSON.parse(jsonText);
-
-    return res.json({
-      success: true,
-      stamps
-    });
-  } catch (err: any) {
-    console.error("AI Stamp Generation Error:", err);
-    return res.status(500).json({
-      success: false,
-      error: "Failed to generate stamps",
-      message: err.message || "An error occurred while generating stamps with Gemini API.",
-      apiKeyUrl: "https://aistudio.google.com/app/apikey"
-    });
+    const stamps = JSON.parse(response.text || "[]");
+    return res.json({ success: true, stamps });
+  } catch (error: unknown) {
+    console.error("AI Stamp Generation Error:", safeErrorLabel(error));
+    return res.status(500).json({ success: false, error: "Failed to generate stamps", message: "The Gemini request failed. Check your API key and try again." });
   }
 });
-
-
-
-// Vite middleware for development or Static assets for production
-const startServer = async () => {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+app.use("/api", (_req, res) => res.status(404).json({ success: false, error: "API route not found" }));
+app.use((error: any, req: Request, res: Response, next: NextFunction) => {
+  if (!req.path.startsWith("/api/")) {
+    next(error);
+    return;
   }
+  const status = error?.type === "entity.too.large" ? 413 : 400;
+  res.status(status).json({
+    success: false,
+    error: status === 413 ? "Request body is too large" : "Malformed request body",
+  });
+});
 
-  // Handle WebSocket Connection Upgrades on same port 3000
-  server.on("upgrade", (request, socket, head) => {
-    if (request.url?.startsWith("/ws")) {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request);
-      });
+function originAllowed(request: http.IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  if (!origin) return !IS_PRODUCTION;
+  if (APP_ORIGINS.has(origin)) return true;
+  try {
+    const parsed = new URL(origin);
+    const host = request.headers.host;
+    if (host && parsed.host === host) return true;
+    return !IS_PRODUCTION && ["localhost", "127.0.0.1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function remoteKeyForRequest(request: http.IncomingMessage): string {
+  const forwarded = request.headers['x-forwarded-for'];
+  const raw = Array.isArray(forwarded) ? forwarded[forwarded.length - 1] : forwarded;
+  const forwardedParts = typeof raw === 'string' ? raw.split(',').map((value) => value.trim()).filter(Boolean) : [];
+  return forwardedParts[0] || request.socket.remoteAddress || 'unknown';
+}
+
+function releaseSocket(ws: WebSocket): void {
+  const context = socketContexts.get(ws);
+  if (!context || context.released) return;
+  context.released = true;
+  const boardId = context.boardId;
+  if (boardId) {
+    const clients = rooms.get(boardId);
+    clients?.delete(ws);
+    if (clients?.size === 0) rooms.delete(boardId);
+  }
+  const remaining = Math.max(0, (connectionsByIp.get(context.remoteKey) || 1) - 1);
+  if (remaining === 0) connectionsByIp.delete(context.remoteKey);
+  else connectionsByIp.set(context.remoteKey, remaining);
+}
+
+function closePolicy(ws: WebSocket, reason: string): void {
+  if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close(1008, reason.slice(0, 100));
+}
+
+function isFiniteNumber(value: unknown, min = -10_000_000, max = 10_000_000): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+}
+function cleanText(value: unknown, max: number, fallback = ""): string {
+  return typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, max) : fallback;
+}
+function cleanColor(value: unknown): string {
+  const color = cleanText(value, 32, "#3b82f6");
+  return /^#[0-9a-f]{3,8}$/i.test(color) ? color : "#3b82f6";
+}
+function pointsValid(points: unknown, max = 1200): boolean {
+  return Array.isArray(points) && points.length <= max && points.every((point) => point && typeof point === "object" && isFiniteNumber((point as any).x) && isFiniteNumber((point as any).y));
+}
+function payloadSize(value: unknown): number {
+  try { return Buffer.byteLength(JSON.stringify(value), "utf8"); } catch { return Number.MAX_SAFE_INTEGER; }
+}
+function containsForbiddenObjectKey(value: unknown, depth = 0): boolean {
+  if (depth > 24) return true;
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => containsForbiddenObjectKey(item, depth + 1));
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (["__proto__", "prototype", "constructor"].includes(key)) return true;
+    if (containsForbiddenObjectKey(item, depth + 1)) return true;
+  }
+  return false;
+}
+function consumeSocketRate(context: SocketContext, type: string): boolean {
+  const limits: Record<string, number> = {
+    cursor: 300, laser_point: 600, drawing_stream: 300, element_focus: 30,
+    element_update: 120, drawing_stream_end: 60, board_manifest_changed: 12,
+    timer_sync: 15, request_follow: 10, stop_follow: 10, ping: 10,
+  };
+  const max = limits[type] ?? 30;
+  const now = Date.now();
+  const current = context.rateWindows.get(type);
+  const entry = !current || now - current.startedAt >= 10_000 ? { startedAt: now, count: 0 } : current;
+  entry.count += 1;
+  context.rateWindows.set(type, entry);
+  return entry.count <= max;
+}
+
+function sanitizeRelayMessage(message: any, context: SocketContext): Record<string, unknown> | null {
+  const type = cleanText(message?.type, 40);
+  if (!type || !consumeSocketRate(context, type)) return null;
+  if (type === "ping") return { type, id: isFiniteNumber(message.id, 0, Number.MAX_SAFE_INTEGER) ? message.id : Date.now() };
+
+  const allowed = context.canWrite ? WRITER_EVENTS : VIEWER_EVENTS;
+  if (!allowed.has(type)) return null;
+  if ((type === "request_follow" || type === "stop_follow") && !context.canManage) return null;
+  const common = { type, boardId: context.boardId, userId: context.userId, lastActive: Date.now() };
+
+  switch (type) {
+    case "cursor":
+      if (!isFiniteNumber(message.x) || !isFiniteNumber(message.y)) return null;
+      return { ...common, x: message.x, y: message.y, panX: isFiniteNumber(message.panX) ? message.panX : 0, panY: isFiniteNumber(message.panY) ? message.panY : 0, zoom: isFiniteNumber(message.zoom, 0.05, 20) ? message.zoom : 1, name: cleanText(message.name, 60, "Collaborator"), color: cleanColor(message.color), role: context.canManage ? "teacher" : "student" };
+    case "laser_point":
+      if (!isFiniteNumber(message.x) || !isFiniteNumber(message.y)) return null;
+      return { ...common, x: message.x, y: message.y, timestamp: Date.now(), color: cleanColor(message.color) };
+    case "element_focus":
+      if (!Array.isArray(message.selectedIds) || message.selectedIds.length > 100 || !message.selectedIds.every((id: unknown) => typeof id === "string" && id.length <= 128)) return null;
+      return { ...common, userName: cleanText(message.userName, 60, "Collaborator"), color: cleanColor(message.color), selectedIds: message.selectedIds };
+    case "drawing_stream":
+      if (!pointsValid(message.points) || !isFiniteNumber(message.width, 0.1, 200)) return null;
+      return { ...common, points: message.points, color: cleanColor(message.color), width: message.width, isHighlighter: message.isHighlighter === true };
+    case "drawing_stream_end":
+      return common;
+    case "element_update": {
+      if (typeof message.elementId !== "string" || message.elementId.length < 1 || message.elementId.length > 128) return null;
+      if (!new Set(["set", "delete"]).has(message.actionType)) return null;
+      if (message.actionType !== "delete" && (!message.elementData || typeof message.elementData !== "object" || Array.isArray(message.elementData))) return null;
+      if (payloadSize(message.elementData) > 64 * 1024 || containsForbiddenObjectKey(message.elementData)) return null;
+      if (message.actionType !== "delete") {
+        const data = message.elementData as Record<string, unknown>;
+        const allowedTypes = new Set(["sticky", "shape", "text", "drawing", "image", "connector", "audio", "stamp", "math", "table"]);
+        if (typeof data.type !== "string" || !allowedTypes.has(data.type)) return null;
+        if (data.id !== undefined && data.id !== message.elementId) return null;
+      }
+      return { ...common, elementId: message.elementId, elementData: message.actionType === "delete" ? undefined : message.elementData, actionType: message.actionType, isMerge: message.isMerge === true };
     }
+    case "timer_sync":
+      if (payloadSize(message.state) > 8 * 1024) return null;
+      return { ...common, state: message.state, isOpen: message.isOpen === true };
+    case "request_follow":
+      return { ...common, teacherId: context.userId, teacherName: cleanText(message.teacherName, 60, "Teacher") };
+    case "stop_follow":
+      return { ...common, teacherId: context.userId };
+    case "board_manifest_changed": {
+      if (!isFiniteNumber(message.revision, 0, Number.MAX_SAFE_INTEGER)) return null;
+      const normalizeShardIds = (value: unknown): string[] | null => {
+        if (!Array.isArray(value) || value.length > 16) return null;
+        const normalized = Array.from(new Set(
+          value.filter((item): item is string => typeof item === "string" && /^shard_([0-9]|1[0-5])$/.test(item)),
+        ));
+        return normalized.length === value.length ? normalized : null;
+      };
+      const changedShardIds = normalizeShardIds(message.changedShardIds);
+      const deletedShardIds = normalizeShardIds(message.deletedShardIds);
+      if (!changedShardIds || !deletedShardIds) return null;
+      return {
+        ...common,
+        revision: message.revision,
+        changedShardIds,
+        deletedShardIds,
+        totalElements: isFiniteNumber(message.totalElements, 0, 1_000_000) ? message.totalElements : 0,
+        updatedAt: isFiniteNumber(message.updatedAt, 0, Number.MAX_SAFE_INTEGER) ? message.updatedAt : Date.now(),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+async function authenticateSocket(ws: WebSocket, message: any, context: SocketContext): Promise<void> {
+  if (context.authenticating) return;
+  if (message?.type !== "authenticate" || typeof message.accessToken !== "string" || message.accessToken.length > 8192 || typeof message.boardId !== "string" || !UUID_PATTERN.test(message.boardId)) {
+    closePolicy(ws, "Authentication required");
+    return;
+  }
+  context.authenticating = true;
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    ws.send(JSON.stringify({ type: "auth_error", error: "Realtime server is not configured." }));
+    closePolicy(ws, "Server not configured");
+    return;
+  }
+
+  const verifier = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+  const { data: userData, error: userError } = await verifier.auth.getUser(message.accessToken);
+  if (userError || !userData.user) {
+    ws.send(JSON.stringify({ type: "auth_error", error: "Session verification failed." }));
+    closePolicy(ws, "Authentication failed");
+    return;
+  }
+
+  const userClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { headers: { Authorization: `Bearer ${message.accessToken}` } },
   });
+  const { data: accessData, error: accessError } = await userClient.rpc("get_board_access", { p_board_id: message.boardId });
+  const access = accessData as { permission?: SocketPermission; canWrite?: boolean; canManage?: boolean } | null;
+  const permission = access?.permission;
+  const canWrite = access?.canWrite === true;
+  const canManage = access?.canManage === true;
+  if (accessError || !permission || !new Set(["viewer", "editor", "owner", "admin"]).has(permission)) {
+    ws.send(JSON.stringify({ type: "auth_error", error: "Board access denied." }));
+    closePolicy(ws, "Board access denied");
+    return;
+  }
 
-  // Handle room-based events
-  wss.on("connection", (ws: WebSocket) => {
-    let currentBoardId: string | null = null;
-    let currentUserId: string | null = null;
+  const clients = rooms.get(message.boardId) || new Set<WebSocket>();
+  if (clients.size >= MAX_ROOM_CLIENTS) {
+    closePolicy(ws, "Board room is full");
+    return;
+  }
+  const sameUserConnections = Array.from(clients).filter((client) => socketContexts.get(client)?.userId === userData.user.id).length;
+  if (sameUserConnections >= MAX_USER_CONNECTIONS_PER_ROOM) {
+    closePolicy(ws, "Too many sessions for this board");
+    return;
+  }
+  context.authenticating = false;
+  context.authenticated = true;
+  context.userId = userData.user.id;
+  context.boardId = message.boardId;
+  context.permission = permission;
+  context.canWrite = canWrite;
+  context.canManage = canManage;
+  context.accessToken = message.accessToken;
+  context.lastAuthorizationCheck = Date.now();
+  if (context.authTimer) clearTimeout(context.authTimer);
+  context.authTimer = null;
+  clients.add(ws);
+  rooms.set(message.boardId, clients);
+  ws.send(JSON.stringify({ type: "authenticated", boardId: message.boardId, permission, canWrite, canManage }));
+}
 
-    ws.on("message", (messageStr: string) => {
-      try {
-        const msg = JSON.parse(messageStr);
-        if (msg.type === "join") {
-          currentBoardId = msg.boardId;
-          currentUserId = msg.userId;
-          if (currentBoardId) {
-            if (!rooms.has(currentBoardId)) {
-              rooms.set(currentBoardId, new Set());
-            }
-            rooms.get(currentBoardId)!.add(ws);
-          }
-        } else if (msg.type === "ping") {
-          ws.send(JSON.stringify({ type: "pong", id: msg.id }));
-        } else if (
-          msg.type === "cursor" ||
-          msg.type === "drawing_stream" ||
-          msg.type === "drawing_stream_end" ||
-          msg.type === "element_update" ||
-          msg.type === "element_focus" ||
-          msg.type === "laser_point" ||
-          msg.type === "timer_sync" ||
-          msg.type === "request_follow" ||
-          msg.type === "stop_follow" ||
-          msg.type === "board_manifest_changed"
-        ) {
-          const boardId = msg.boardId || currentBoardId;
-          if (boardId && rooms.has(boardId)) {
-            const clients = rooms.get(boardId)!;
-            const payload = JSON.stringify(msg);
-            clients.forEach((client) => {
-              if (client !== ws && client.readyState === WebSocket.OPEN) {
-                client.send(payload);
-              }
-            });
-          }
-        }
-      } catch (err) {
-        console.error("WS message error:", err);
-      }
+async function loadAuthoritativeManifest(
+  ws: WebSocket,
+  context: SocketContext,
+  requestedRevision: number,
+): Promise<Record<string, unknown> | null> {
+  if (!context.accessToken || !context.boardId) return null;
+  const userClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: { headers: { Authorization: `Bearer ${context.accessToken}` } },
+  });
+  const { data, error } = await userClient
+    .from("boards")
+    .select("current_revision,changed_shard_ids,deleted_shard_ids,total_elements,updated_at")
+    .eq("id", context.boardId)
+    .maybeSingle();
+  if (error || !data) {
+    closePolicy(ws, "Board access expired");
+    return null;
+  }
+  const revision = Number(data.current_revision || 0);
+  if (!Number.isFinite(revision) || revision !== requestedRevision) return null;
+  const normalize = (value: unknown): string[] => Array.isArray(value)
+    ? Array.from(new Set(value.filter((item): item is string => typeof item === "string" && /^shard_([0-9]|1[0-5])$/.test(item))))
+    : [];
+  return {
+    revision,
+    changedShardIds: normalize(data.changed_shard_ids),
+    deletedShardIds: normalize(data.deleted_shard_ids),
+    totalElements: Math.max(0, Number(data.total_elements || 0)),
+    updatedAt: Math.max(0, Number(data.updated_at || Date.now())),
+  };
+}
+
+async function refreshSocketAuthorization(ws: WebSocket, context: SocketContext, maxAgeMs: number): Promise<boolean> {
+  if (!context.accessToken || !context.boardId || !SUPABASE_URL || !SUPABASE_KEY) return false;
+  if (Date.now() - context.lastAuthorizationCheck < maxAgeMs) return true;
+  if (context.authorizationRefresh) return context.authorizationRefresh;
+
+  context.authorizationRefresh = (async () => {
+    const userClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { Authorization: `Bearer ${context.accessToken}` } },
     });
+    const { data, error } = await userClient.rpc("get_board_access", { p_board_id: context.boardId });
+    const access = data as { permission?: SocketPermission; canWrite?: boolean; canManage?: boolean } | null;
+    if (error || !access?.permission || !new Set(["viewer", "editor", "owner", "admin"]).has(access.permission)) {
+      closePolicy(ws, "Board access expired");
+      return false;
+    }
+    const nextPermission = access.permission;
+    const nextCanWrite = access.canWrite === true;
+    const nextCanManage = access.canManage === true;
+    const changed = context.permission !== nextPermission || context.canWrite !== nextCanWrite || context.canManage !== nextCanManage;
+    context.permission = nextPermission;
+    context.canWrite = nextCanWrite;
+    context.canManage = nextCanManage;
+    context.lastAuthorizationCheck = Date.now();
+    if (changed && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "permission_updated",
+        boardId: context.boardId,
+        permission: nextPermission,
+        canWrite: nextCanWrite,
+        canManage: nextCanManage,
+      }));
+    }
+    return true;
+  })();
 
-    ws.on("close", () => {
-      if (currentBoardId && rooms.has(currentBoardId)) {
-        const clients = rooms.get(currentBoardId)!;
-        clients.delete(ws);
-        if (clients.size === 0) {
-          rooms.delete(currentBoardId);
+  try {
+    return await context.authorizationRefresh;
+  } finally {
+    context.authorizationRefresh = null;
+  }
+}
+
+function configureWebSockets(): void {
+  server.on("upgrade", (request, socket, head) => {
+    let pathname = "";
+    try { pathname = new URL(request.url || "/", "http://localhost").pathname; } catch { socket.destroy(); return; }
+    if (pathname !== "/ws" || !originAllowed(request)) { socket.destroy(); return; }
+    wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
+  });
+
+  wss.on("connection", (ws: WebSocket, request: http.IncomingMessage) => {
+    const remoteKey = remoteKeyForRequest(request);
+    const connectionCount = connectionsByIp.get(remoteKey) || 0;
+    const context: SocketContext = {
+      authenticated: false, authenticating: false, userId: null, boardId: null, permission: null, canWrite: false, canManage: false,
+      accessToken: null, lastAuthorizationCheck: 0, authorizationRefresh: null, remoteKey, released: false,
+      isAlive: true, authTimer: null, rateWindows: new Map(),
+    };
+    socketContexts.set(ws, context);
+    if (connectionCount >= MAX_CONNECTIONS_PER_IP) {
+      context.released = true;
+      closePolicy(ws, "Too many connections");
+      return;
+    }
+    connectionsByIp.set(remoteKey, connectionCount + 1);
+    context.authTimer = setTimeout(() => closePolicy(ws, "Authentication timeout"), 5_000);
+
+    ws.on("pong", () => { context.isAlive = true; });
+    ws.on("message", (raw: RawData) => {
+      void (async () => {
+        try {
+          const text = raw.toString();
+          if (Buffer.byteLength(text, "utf8") > 128 * 1024) return closePolicy(ws, "Payload too large");
+          const message = JSON.parse(text);
+          if (!context.authenticated) return await authenticateSocket(ws, message, context);
+          const messageType = cleanText(message?.type, 40);
+          const authorizationMaxAge = VIEWER_EVENTS.has(messageType) ? 60_000 : 10_000;
+          if (!(await refreshSocketAuthorization(ws, context, authorizationMaxAge))) return;
+          let payload = sanitizeRelayMessage(message, context);
+          if (!payload) return;
+          if (payload.type === "board_manifest_changed") {
+            const authoritative = await loadAuthoritativeManifest(ws, context, Number(payload.revision));
+            if (!authoritative) return;
+            payload = { ...payload, ...authoritative };
+          }
+          if (payload.type === "ping") {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong", id: payload.id }));
+            return;
+          }
+          const clients = context.boardId ? rooms.get(context.boardId) : null;
+          if (!clients) return;
+          const encoded = JSON.stringify(payload);
+          for (const client of clients) {
+            if (client === ws || client.readyState !== WebSocket.OPEN) continue;
+            if (client.bufferedAmount > BACKPRESSURE_LIMIT && EPHEMERAL_EVENTS.has(String(payload.type))) continue;
+            if (client.bufferedAmount > BACKPRESSURE_LIMIT * 4) { client.terminate(); continue; }
+            client.send(encoded);
+          }
+        } catch (error: unknown) {
+          console.error("WS message rejected:", safeErrorLabel(error));
         }
-      }
+      })();
     });
+    ws.on("close", () => releaseSocket(ws));
+    ws.on("error", (error) => { console.error("WebSocket error:", safeErrorLabel(error)); releaseSocket(ws); });
   });
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-};
+  const heartbeat = setInterval(() => {
+    for (const client of wss.clients) {
+      const context = socketContexts.get(client);
+      if (!context) continue;
+      if (!context.isAlive) { client.terminate(); releaseSocket(client); continue; }
+      context.isAlive = false;
+      client.ping();
+      if (context.authenticated) {
+        void refreshSocketAuthorization(client, context, 5 * 60_000).catch((error) => {
+          console.error("WS authorization refresh failed:", safeErrorLabel(error));
+          closePolicy(client, "Authorization refresh failed");
+        });
+      }
+    }
+  }, 30_000);
+  heartbeat.unref();
+}
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-});
+async function configureFrontend(): Promise<void> {
+  if (!IS_PRODUCTION) {
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    app.use(vite.middlewares);
+    return;
+  }
+  const distPath = path.join(process.cwd(), "dist");
+  const indexPath = path.join(distPath, "index.html");
+  try { await access(indexPath, fsConstants.R_OK); }
+  catch { throw new Error(`Production build not found at ${indexPath}. Run the Vite build before starting the server.`); }
+  app.use(express.static(distPath));
+  app.get("*", (req, res) => {
+    if (req.path === "/ws" || req.path.startsWith("/api/") || req.path === "/healthz") return res.sendStatus(404);
+    return res.sendFile(indexPath);
+  });
+}
+
+async function shutdown(signal: string): Promise<void> {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`Received ${signal}. Shutting down cleanly.`);
+  const forceExitTimer = setTimeout(() => { console.error("Graceful shutdown timed out; forcing exit."); process.exit(1); }, 8_000);
+  forceExitTimer.unref();
+  for (const client of wss.clients) { try { client.close(1001, "Server shutting down"); } catch { client.terminate(); } }
+  await new Promise<void>((resolve) => wss.close(() => resolve()));
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  clearTimeout(forceExitTimer);
+  process.exit(0);
+}
+
+async function startServer(): Promise<void> {
+  await configureFrontend();
+  configureWebSockets();
+  server.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://0.0.0.0:${PORT}`));
+}
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.on("unhandledRejection", (reason) => console.error("Unhandled promise rejection:", safeErrorLabel(reason)));
+process.on("uncaughtException", (error) => { console.error("Uncaught exception:", safeErrorLabel(error)); void shutdown("uncaughtException"); });
+startServer().catch((error: unknown) => { console.error("Failed to start server:", safeErrorLabel(error)); process.exitCode = 1; });
