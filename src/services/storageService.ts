@@ -58,12 +58,12 @@ export function computeContentHash(data: string): string {
 
 export async function compressImageBase64(
   base64DataUrl: string,
-  maxWidth: number = 2000,
-  maxHeight: number = 2000,
-  quality: number = 0.88
+  maxWidth: number = 1600,
+  maxHeight: number = 1600,
+  quality: number = 0.78
 ): Promise<string> {
   if (typeof window === 'undefined' || typeof Image === 'undefined') return base64DataUrl;
-  if (base64DataUrl.length < 700_000) return base64DataUrl;
+  if (base64DataUrl.length < 150_000) return base64DataUrl;
 
   return new Promise((resolve) => {
     const image = new Image();

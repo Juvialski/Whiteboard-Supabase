@@ -28,8 +28,8 @@ export const MAX_STATE_SHARD_DOCUMENT_BYTES = 4_000_000;
 export const TARGET_CHUNK_SIZE_BYTES = 1_500_000;
 export const MAX_SINGLE_ELEMENT_BYTES = 2_000_000;
 
-const IDLE_FLUSH_DELAY = 1_200;
-const MAX_FLUSH_INTERVAL = 5_000;
+const IDLE_FLUSH_DELAY = 2_000;
+const MAX_FLUSH_INTERVAL = 8_000;
 const PENDING_KEY_PREFIX = 'supabase_pending_mutations_';
 
 export interface MutationItem {
@@ -238,7 +238,7 @@ export function sanitizeElementForStorage(element: BoardElement): BoardElement {
 
 export function simplifyPoints(
   points: { x: number; y: number }[],
-  tolerance: number = 1.2
+  tolerance: number = 1.5
 ): { x: number; y: number }[] {
   if (points.length <= 2) return points;
   const result = [points[0]];
