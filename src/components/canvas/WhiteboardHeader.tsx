@@ -397,27 +397,29 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           <span className="hidden lg:inline">Export SVG</span>
         </button>
 
-        <button
-          onClick={copyBoardLink}
-          className={`hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-medium items-center space-x-1.5 transition-all cursor-pointer shrink-0 ${
-            copiedLink
-              ? "bg-green-500 text-white shadow-xs"
-              : "bg-blue-600 hover:bg-blue-700 text-white shadow-xs"
-          }`}
-          title="Share Canvas"
-        >
-          {copiedLink ? (
-            <>
-              <Check className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden lg:inline">Link Copied</span>
-            </>
-          ) : (
-            <>
-              <Share2 className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden lg:inline">Share Canvas</span>
-            </>
-          )}
-        </button>
+        {canManage && (
+          <button
+            onClick={copyBoardLink}
+            className={`hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-medium items-center space-x-1.5 transition-all cursor-pointer shrink-0 ${
+              copiedLink
+                ? "bg-green-500 text-white shadow-xs"
+                : "bg-blue-600 hover:bg-blue-700 text-white shadow-xs"
+            }`}
+            title="Create secure sharing link"
+          >
+            {copiedLink ? (
+              <>
+                <Check className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden lg:inline">Link Copied</span>
+              </>
+            ) : (
+              <>
+                <Share2 className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden lg:inline">Share Canvas</span>
+              </>
+            )}
+          </button>
+        )}
 
         {/* Subtle Button to Hide Header */}
         <button
@@ -556,29 +558,31 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
               )}
 
               {/* Share Canvas */}
-              <button
-                onClick={() => {
-                  copyBoardLink();
-                  setIsHeaderMenuOpen(false);
-                }}
-                className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition-all cursor-pointer border ${
-                  copiedLink
-                    ? "bg-green-500 border-green-600 text-white"
-                    : "bg-blue-600 border-blue-700 text-white"
-                }`}
-              >
-                {copiedLink ? (
-                  <>
-                    <Check className="w-4 h-4 shrink-0" />
-                    <span>Link Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Share2 className="w-4 h-4 shrink-0" />
-                    <span>Share Canvas</span>
-                  </>
-                )}
-              </button>
+              {canManage && (
+                <button
+                  onClick={() => {
+                    void copyBoardLink();
+                    setIsHeaderMenuOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition-all cursor-pointer border ${
+                    copiedLink
+                      ? "bg-green-500 border-green-600 text-white"
+                      : "bg-blue-600 border-blue-700 text-white"
+                  }`}
+                >
+                  {copiedLink ? (
+                    <>
+                      <Check className="w-4 h-4 shrink-0" />
+                      <span>Link Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Share2 className="w-4 h-4 shrink-0" />
+                      <span>Share Canvas</span>
+                    </>
+                  )}
+                </button>
+              )}
 
               {/* Hide Header */}
               <button

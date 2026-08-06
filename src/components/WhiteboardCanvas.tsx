@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { get as idbGet, set as idbSet } from "idb-keyval";
 import { setDoc, doc } from "../lib/supabaseDb";
-import { db, auth } from "../supabase";
+import { db, auth, supabase } from "../supabase";
 import { isSandboxEnvironment, getSandboxLocalElements, saveSandboxLocalElements } from "../utils/sandboxGuard";
 import { getBoardPermissions } from "../utils/boardPermissions";
 import {
@@ -3559,12 +3559,44 @@ export default function WhiteboardCanvas({
     setZoom(nextZoom);
   };
 
-  // Share Board link copying
-  const copyBoardLink = () => {
-    const link = `${window.location.origin}/?board=${boardId}`;
-    navigator.clipboard.writeText(link);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2500);
+  // Create a secure one-time sharing token. A raw ?board= URL does not grant
+  // access under the hardened Supabase policies and must never be copied as an
+  // invitation.
+  const copyBoardLink = async () => {
+    if (!canManage) {
+      showSyncToast("Only the board owner or an administrator can create sharing links.", "warning");
+      return;
+    }
+
+    try {
+      const shareRole = studentsCanWrite ? "editor" : "viewer";
+      const { data, error } = await supabase.rpc("create_board_share_link", {
+        p_board_id: boardId,
+        p_role: shareRole,
+        p_expires_at: null,
+      });
+
+      if (error) throw new Error(error.message);
+
+      const payload = data as any;
+      const rawToken = String(payload?.rawToken || payload?.raw_token || "");
+      if (!rawToken) throw new Error("Supabase did not return a sharing token.");
+
+      const link = `${window.location.origin}/?share=${encodeURIComponent(rawToken)}`;
+      await navigator.clipboard.writeText(link);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+      showSyncToast(
+        `${shareRole === "editor" ? "Editable" : "View-only"} secure link copied.`,
+        "success"
+      );
+    } catch (error) {
+      console.error("Unable to create secure share link:", error);
+      showSyncToast(
+        `Could not create the share link: ${error instanceof Error ? error.message : String(error)}`,
+        "error"
+      );
+    }
   };
 
   return (
