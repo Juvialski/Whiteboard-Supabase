@@ -121,9 +121,40 @@ function extensionForMime(mimeType: string): string {
 }
 
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const response = await fetch(dataUrl);
-  if (!response.ok) throw new Error('Unable to decode the selected media file.');
-  return response.blob();
+  // Do not use fetch(dataUrl) here. Production CSP intentionally limits
+  // connect-src, and browsers treat fetching a data: URL as a connection.
+  // Decode it locally instead so uploads work without weakening the CSP.
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('The selected media file is not a valid data URL.');
+  }
+
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex < 5) {
+    throw new Error('The selected media file has an invalid data URL.');
+  }
+
+  const header = dataUrl.slice(5, commaIndex);
+  const payload = dataUrl.slice(commaIndex + 1);
+  const headerParts = header.split(';').filter(Boolean);
+  const mimeType = (headerParts[0] || 'application/octet-stream').toLowerCase();
+  const isBase64 = headerParts.some((part) => part.toLowerCase() === 'base64');
+
+  try {
+    if (isBase64) {
+      const normalizedPayload = payload.replace(/\s/g, '');
+      const binary = atob(normalizedPayload);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) {
+        bytes[index] = binary.charCodeAt(index);
+      }
+      return new Blob([bytes], { type: mimeType });
+    }
+
+    const decoded = decodeURIComponent(payload);
+    return new Blob([decoded], { type: mimeType });
+  } catch {
+    throw new Error('Unable to decode the selected media file.');
+  }
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
