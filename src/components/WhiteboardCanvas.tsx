@@ -97,6 +97,7 @@ interface CompressedImage {
   base64Str: string;
   width: number;
   height: number;
+  mimeType: 'image/jpeg';
 }
 
 interface LaserPoint {
@@ -142,7 +143,7 @@ const compressImage = (file: File): Promise<CompressedImage | null> => {
         ctx.drawImage(img, 0, 0, width, height);
         // Output as high-quality JPEG (balanced visually and file size-wise)
         const compressedBase64 = canvas.toDataURL("image/jpeg", 0.85);
-        resolve({ base64Str: compressedBase64, width, height });
+        resolve({ base64Str: compressedBase64, width, height, mimeType: 'image/jpeg' });
       };
       img.onerror = () => resolve(null);
       img.src = event.target?.result as string;
@@ -1727,14 +1728,28 @@ export default function WhiteboardCanvas({
     const width = lastPage ? lastPage.width : 600;
     const height = lastPage ? lastPage.height : 800;
 
-    const blankSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#ffffff"/><text x="50%" y="50%" font-family="sans-serif" font-size="16" fill="#94a3b8" text-anchor="middle">Blank PDF Page</text></svg>`;
-    const dataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(blankSvg)}`;
+    const blankCanvas = document.createElement("canvas");
+    blankCanvas.width = Math.max(1, Math.round(width));
+    blankCanvas.height = Math.max(1, Math.round(height));
+    const blankContext = blankCanvas.getContext("2d");
+    if (!blankContext) {
+      showSyncToast("Failed to create blank page", "error");
+      return;
+    }
+    blankContext.fillStyle = "#ffffff";
+    blankContext.fillRect(0, 0, blankCanvas.width, blankCanvas.height);
+    blankContext.fillStyle = "#94a3b8";
+    blankContext.font = "16px sans-serif";
+    blankContext.textAlign = "center";
+    blankContext.textBaseline = "middle";
+    blankContext.fillText("Blank PDF Page", blankCanvas.width / 2, blankCanvas.height / 2);
+    const dataUrl = blankCanvas.toDataURL("image/png");
 
     const id = `pdf-page-${pdfPages.length}-${Date.now()}`;
 
     if (boardId && !isSandboxEnvironment()) {
       import('../services/storageService').then(({ saveBoardAsset }) => {
-        saveBoardAsset(boardId, undefined, dataUrl, "image/svg+xml")
+        saveBoardAsset(boardId, undefined, dataUrl, "image/png")
           .then((saved) => {
             const newPage: ImageElement = {
               id,
@@ -2057,7 +2072,7 @@ export default function WhiteboardCanvas({
           const result = await compressImage(file);
           if (!result) continue;
 
-          const { base64Str, width: originalWidth, height: originalHeight } = result;
+          const { base64Str, width: originalWidth, height: originalHeight, mimeType: compressedMimeType } = result;
 
           // Place the image centered in the user's current view
           let x = 100;
@@ -2088,12 +2103,14 @@ export default function WhiteboardCanvas({
           if (!isSandboxEnvironment()) {
             try {
               const { saveBoardAsset } = await import("../services/storageService");
-              const meta = await saveBoardAsset(boardId, undefined, base64Str, "image/png");
+              const meta = await saveBoardAsset(boardId, undefined, base64Str, compressedMimeType);
               assetId = meta.assetId;
               mimeType = meta.mimeType;
             } catch (storageErr) {
               console.error("Failed to save pasted image asset:", storageErr);
-              showSyncToast("Failed to save image asset to cloud", "error");
+              const rawMessage = storageErr instanceof Error ? storageErr.message : String(storageErr);
+              const usefulMessage = rawMessage.replace(/^Failed to save asset:\s*/i, "").slice(0, 160);
+              showSyncToast(`Image upload failed: ${usefulMessage}`, "error", 7000);
               return;
             }
           }

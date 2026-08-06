@@ -30,8 +30,20 @@ const assetCacheMap = new Map<string, BoardAssetDoc>();
 const hashToAssetIdMap = new Map<string, string>();
 const inFlightAssetRequests = new Map<string, Promise<BoardAssetDoc | null>>();
 
-export const MAX_ASSET_DOCUMENT_BYTES = 50 * 1024 * 1024;
+export const MAX_ASSET_DOCUMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_SAFE_ASSET_BYTES = MAX_ASSET_DOCUMENT_BYTES;
+
+const ALLOWED_ASSET_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'application/pdf',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/ogg',
+  'audio/webm',
+]);
 
 export async function computeSHA256Hash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -100,7 +112,6 @@ function extensionForMime(mimeType: string): string {
   if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
   if (normalized.includes('webp')) return 'webp';
   if (normalized.includes('gif')) return 'gif';
-  if (normalized.includes('svg')) return 'svg';
   if (normalized.includes('pdf')) return 'pdf';
   if (normalized.includes('mpeg')) return 'mp3';
   if (normalized.includes('wav')) return 'wav';
@@ -149,11 +160,17 @@ export async function saveBoardAsset(
   userId?: string
 ): Promise<SavedAssetMeta> {
   let finalData = base64DataUrl;
-  if (contentType.startsWith('image/')) finalData = await compressImageBase64(base64DataUrl);
+  if (contentType.startsWith('image/') && contentType !== 'image/gif') {
+    finalData = await compressImageBase64(base64DataUrl);
+  }
 
   const blob = await dataUrlToBlob(finalData);
+  const effectiveContentType = (blob.type || contentType || '').toLowerCase().split(';')[0].trim();
+  if (!ALLOWED_ASSET_MIME_TYPES.has(effectiveContentType)) {
+    throw new Error(`Unsupported asset type: ${effectiveContentType || 'unknown'}.`);
+  }
   if (blob.size > MAX_SAFE_ASSET_BYTES) {
-    throw new Error(`File is ${Math.ceil(blob.size / 1024 / 1024)} MB. The maximum asset size is 50 MB.`);
+    throw new Error(`File is ${Math.ceil(blob.size / 1024 / 1024)} MB. The maximum asset size is 20 MB.`);
   }
 
   const contentHash = await computeSHA256Hash(finalData);
@@ -173,14 +190,14 @@ export async function saveBoardAsset(
   }
 
   const assetId = providedAssetId || `asset_${contentHash.slice(0, 32)}`;
-  const objectPath = `boards/${boardId}/${assetId}.${extensionForMime(contentType)}`;
+  const objectPath = `boards/${boardId}/${assetId}.${extensionForMime(effectiveContentType)}`;
   const createdAt = Date.now();
   const createdBy = userId || auth.currentUser?.uid;
 
   const assetDoc: BoardAssetDoc = {
     assetId,
     encoding: 'base64',
-    mimeType: contentType,
+    mimeType: effectiveContentType,
     data: finalData,
     encodedByteSize: finalData.length,
     originalByteSize: blob.size,
@@ -191,18 +208,18 @@ export async function saveBoardAsset(
   };
 
   const cacheKey = `${boardId}:${assetId}`;
-  assetCacheMap.set(cacheKey, assetDoc);
-  hashToAssetIdMap.set(hashKey, assetId);
 
   if (isSandboxEnvironment()) {
-    return { assetId, mimeType: contentType, encodedByteSize: finalData.length };
+    assetCacheMap.set(cacheKey, assetDoc);
+    hashToAssetIdMap.set(hashKey, assetId);
+    return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   }
 
   try {
     const { error: uploadError } = await supabase.storage
       .from(BUCKET)
       .upload(objectPath, blob, {
-        contentType,
+        contentType: effectiveContentType,
         cacheControl: '31536000',
         upsert: false,
       });
@@ -234,7 +251,7 @@ export async function saveBoardAsset(
     const metadataRow = {
       board_id: boardId,
       asset_id: assetId,
-      mime_type: contentType,
+      mime_type: effectiveContentType,
       object_path: objectPath,
       encoded_byte_size: finalData.length,
       original_byte_size: blob.size,
@@ -268,11 +285,14 @@ export async function saveBoardAsset(
 
     trackOperation('write', 'supabase-storage-upload', 1);
     trackOperation('write', 'supabase-asset-metadata', 1);
-    return { assetId, mimeType: contentType, encodedByteSize: finalData.length };
+    assetCacheMap.set(cacheKey, assetDoc);
+    hashToAssetIdMap.set(hashKey, assetId);
+    return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   } catch (error) {
     assetCacheMap.delete(cacheKey);
     hashToAssetIdMap.delete(hashKey);
-    throw new Error(`Failed to save asset: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to save asset: ${message}`);
   }
 }
 
