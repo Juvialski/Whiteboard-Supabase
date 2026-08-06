@@ -466,18 +466,7 @@ export async function setDoc(
   }
 
   if (resource.type === 'shards') {
-    const row = {
-      board_id: resource.boardId,
-      shard_id: ref.id,
-      revision: Number(data.revision || 0),
-      elements: data.elements || {},
-      tombstones: data.tombstones || {},
-      updated_at: Number(data.updatedAt || Date.now()),
-    };
-    const { error } = await supabase.from('board_shards').upsert(row, { onConflict: 'board_id,shard_id' });
-    throwIfError(error);
-    emitLocalChange(ref.path);
-    return;
+    throw new Error('Direct board_shards writes are disabled. Persist elements through apply_board_mutations instead.');
   }
 
   if (resource.type === 'assets') {

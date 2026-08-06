@@ -103,21 +103,17 @@ export function toCompatAuthUser(user: User | null): CompatAuthUser | null {
     isAnonymous,
     raw: user,
     getIdTokenResult: async () => {
-      let profileIsAdmin = false;
+      let databaseIsAdmin = false;
       try {
-        const { data } = await supabase
-          .from('profiles')
-          .select('is_admin')
-          .eq('id', user.id)
-          .maybeSingle();
-        profileIsAdmin = Boolean((data as any)?.is_admin);
+        const { data, error } = await supabase.rpc('is_admin');
+        if (!error) databaseIsAdmin = data === true;
       } catch {
         // RLS or an offline connection should not block normal authentication.
       }
       return {
         claims: {
           ...appMetadata,
-          admin: Boolean(appMetadata.admin || appMetadata.is_admin || profileIsAdmin),
+          admin: Boolean(databaseIsAdmin || appMetadata.admin === true),
           is_anonymous: isAnonymous,
         },
       };

@@ -41,7 +41,7 @@ const SHAPES = new Set([
   "any", "rounded-rect", "circle", "star", "badge", "diamond", "banner",
   "hexagon", "ribbon", "heart", "shield", "crest",
 ]);
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BOARD_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
 const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "ping"]);
 const WRITER_EVENTS = new Set([
   ...VIEWER_EVENTS,
@@ -89,6 +89,7 @@ function securityHeaders(_req: Request, res: Response, next: NextFunction): void
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
   if (IS_PRODUCTION) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     res.setHeader(
       "Content-Security-Policy",
       [
@@ -365,7 +366,7 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
 
 async function authenticateSocket(ws: WebSocket, message: any, context: SocketContext): Promise<void> {
   if (context.authenticating) return;
-  if (message?.type !== "authenticate" || typeof message.accessToken !== "string" || message.accessToken.length > 8192 || typeof message.boardId !== "string" || !UUID_PATTERN.test(message.boardId)) {
+  if (message?.type !== "authenticate" || typeof message.accessToken !== "string" || message.accessToken.length > 8192 || typeof message.boardId !== "string" || !BOARD_ID_PATTERN.test(message.boardId)) {
     closePolicy(ws, "Authentication required");
     return;
   }

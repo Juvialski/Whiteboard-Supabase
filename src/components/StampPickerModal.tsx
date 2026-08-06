@@ -165,8 +165,19 @@ export default function StampPickerModal({
   const [selectedColor, setSelectedColor] = useState("#bbf7d0");
   const [selectedShape, setSelectedShape] = useState<StampElement["stampShape"]>("rounded-rect");
 
-  // AI Generator State
-  const [aiApiKey, setAiApiKey] = useState(() => localStorage.getItem("lucid_spark_user_gemini_key") || "");
+  // AI Generator State. Keep user-supplied API keys only for the current
+  // browser session; never persist them permanently in localStorage.
+  const [aiApiKey, setAiApiKey] = useState(() => {
+    if (typeof window === "undefined") return "";
+    const sessionKey = sessionStorage.getItem("lucid_spark_session_gemini_key") || "";
+    const legacyKey = localStorage.getItem("lucid_spark_user_gemini_key") || "";
+    localStorage.removeItem("lucid_spark_user_gemini_key");
+    if (!sessionKey && legacyKey) {
+      sessionStorage.setItem("lucid_spark_session_gemini_key", legacyKey);
+      return legacyKey;
+    }
+    return sessionKey;
+  });
   const [showApiKey, setShowApiKey] = useState(false);
   const [aiPrompt, setAiPrompt] = useState("Science experiment feedback with rocket or atom");
   const [aiShape, setAiShape] = useState<string>("any");
@@ -188,7 +199,10 @@ export default function StampPickerModal({
 
   const handleSaveApiKey = (val: string) => {
     setAiApiKey(val);
-    localStorage.setItem("lucid_spark_user_gemini_key", val.trim());
+    const trimmed = val.trim();
+    if (trimmed) sessionStorage.setItem("lucid_spark_session_gemini_key", trimmed);
+    else sessionStorage.removeItem("lucid_spark_session_gemini_key");
+    localStorage.removeItem("lucid_spark_user_gemini_key");
   };
 
   if (!isOpen) return null;
@@ -608,6 +622,10 @@ export default function StampPickerModal({
                   {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               </div>
+
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                Kept only for this browser session and cleared when the session ends.
+              </p>
 
               {!aiApiKey.trim() && (
                 <div className="p-2.5 bg-amber-50/90 border border-amber-200/80 rounded-xl text-[11px] text-amber-900 leading-relaxed flex flex-col space-y-1.5">

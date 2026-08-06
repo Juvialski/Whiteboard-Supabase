@@ -79,8 +79,11 @@ export default function App() {
   useEffect(() => {
     // Check if joining via shareable link parameter
     const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     const urlBoardId = params.get('board');
-    const rawShareToken = params.get('share');
+    // Prefer a URL fragment so the one-time share secret is not sent in HTTP
+    // requests or access logs. Query-string links remain supported for older links.
+    const rawShareToken = hashParams.get('share') || params.get('share');
 
     // Subscribe to Supabase authentication changes
     const unsubscribe = onAuthStateChanged(auth, (user) => {

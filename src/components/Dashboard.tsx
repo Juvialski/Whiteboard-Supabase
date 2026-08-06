@@ -788,7 +788,7 @@ export default function Dashboard({
         const rawToken = String(payload?.rawToken || payload?.raw_token || '');
         if (!rawToken) throw new Error('Supabase did not return a sharing token.');
 
-        link = `${window.location.origin}/?share=${encodeURIComponent(rawToken)}`;
+        link = `${window.location.origin}/#share=${encodeURIComponent(rawToken)}`;
         setBoards((current) => current.map((item) =>
           item.id === board.id ? { ...item, accessMode: 'shared' } : item
         ));
@@ -1639,7 +1639,7 @@ export default function Dashboard({
                     </h3>
                     <p className="text-xs text-slate-500 leading-relaxed max-w-xl">
                       Instantly toggle whether the whiteboard application is available for other students and teachers. 
-                      Users with <strong className="text-red-600">profiles.is_admin = true</strong> bypass this lock to prevent administrator lockout.
+                      Users listed in <strong className="text-red-600">private.admin_users</strong> bypass this lock to prevent administrator lockout.
                     </p>
                   </div>
 

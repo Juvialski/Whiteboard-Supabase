@@ -1668,12 +1668,12 @@ export default function WhiteboardCanvas({
       if (exists) {
         updatedElements = currentElements.map(el => {
           if (el.id === elementId) {
-            return isMerge ? { ...el, ...processedData } : { id: elementId, ...processedData };
+            return isMerge ? { ...el, ...processedData, id: elementId } : { ...processedData, id: elementId };
           }
           return el;
         });
       } else {
-        updatedElements = [...currentElements, { id: elementId, ...processedData } as BoardElement];
+        updatedElements = [...currentElements, { ...processedData, id: elementId } as BoardElement];
       }
     }
 
@@ -3645,7 +3645,7 @@ export default function WhiteboardCanvas({
       const rawToken = String(payload?.rawToken || payload?.raw_token || "");
       if (!rawToken) throw new Error("Supabase did not return a sharing token.");
 
-      const link = `${window.location.origin}/?share=${encodeURIComponent(rawToken)}`;
+      const link = `${window.location.origin}/#share=${encodeURIComponent(rawToken)}`;
       await navigator.clipboard.writeText(link);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2500);
