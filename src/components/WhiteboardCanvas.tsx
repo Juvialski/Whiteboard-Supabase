@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { get as idbGet, set as idbSet } from "idb-keyval";
 import { setDoc, doc } from "../lib/supabaseDb";
 import { db, auth, supabase } from "../supabase";
 import { isSandboxEnvironment, getSandboxLocalElements, saveSandboxLocalElements } from "../utils/sandboxGuard";
@@ -9,6 +8,7 @@ import {
   queueElementMutation,
   flushBoardCheckpoint,
 } from "../services/boardPersistence";
+import { getRealtimeAccessToken } from "../services/realtimeAuth";
 import {
   BoardElement,
   Point,
@@ -368,69 +368,105 @@ export default function WhiteboardCanvas({
     };
   }, [boardId]);
 
-  // Load heavy drawings from local IndexedDB cache instantly upon mounting (resilience)
-  useEffect(() => {
-    const loadFromIDB = async () => {
-      try {
-        const cachedDrawings = await idbGet<DrawingElement[]>(`drawings_${boardId}`);
-        if (cachedDrawings && cachedDrawings.length > 0) {
-          const sanitizedDrawings = cachedDrawings.filter(
-            (el): el is DrawingElement => el !== null && el !== undefined && typeof el === "object" && typeof el.id === "string" && el.type === "drawing"
-          );
-          if (sanitizedDrawings.length > 0) {
-            setElements((prev) => {
-              const nonDrawings = prev.filter(el => el && typeof el.id === "string" && el.type !== "drawing");
-              return [...nonDrawings, ...sanitizedDrawings];
-            });
-          }
-        }
-      } catch (err) {
-        console.error("IndexedDB cache loading error:", err);
-      }
-    };
-    loadFromIDB();
-  }, [boardId]);
+  // Do not load the legacy `drawings_${boardId}` cache here. That cache was
+  // device-local and replaced the authoritative cloud drawing set, making two
+  // collaborators appear to be on separate boards. The full recovery cache
+  // above is only a temporary preview; Supabase always replaces it after load.
 
-  // Connect to the HTTP-integrated local WebSocket server on the same origin
+  // Connect to the authenticated same-origin WebSocket relay. The server rejects
+  // the old unauthenticated `join` protocol, so the first message must contain
+  // a current Supabase access token and the board ID.
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
-    
-    let socket: WebSocket;
-    let reconnectTimer: any;
-    let pingInterval: any;
-    
-    const connect = () => {
-      socket = new WebSocket(wsUrl);
-      wsRef.current = socket;
-      
-      socket.onopen = () => {
-        console.log("WebSocket connected to real-time relay for board:", boardId);
-        setWsConnected(true);
-        // Register client to this specific board room
-        socket.send(JSON.stringify({
-          type: "join",
-          boardId,
-          userId: currentUser.id
-        }));
 
-        // Connection heartbeat (ping) to keep connection alive and compute latency
-        pingInterval = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-              type: "ping",
-              id: Date.now()
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+    let reconnectAttempt = 0;
+
+    const clearPing = () => {
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = null;
+    };
+
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer) return;
+      const baseDelay = Math.min(10_000, 1_000 * 2 ** Math.min(reconnectAttempt, 3));
+      const jitter = Math.floor(Math.random() * 400);
+      reconnectAttempt += 1;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, baseDelay + jitter);
+    };
+
+    const connect = () => {
+      if (stopped) return;
+      const nextSocket = new WebSocket(wsUrl);
+      socket = nextSocket;
+
+      nextSocket.onopen = () => {
+        void getRealtimeAccessToken()
+          .then((accessToken) => {
+            if (stopped || nextSocket.readyState !== WebSocket.OPEN) return;
+            nextSocket.send(JSON.stringify({
+              type: "authenticate",
+              accessToken,
+              boardId,
             }));
-          }
-        }, 15000);
+          })
+          .catch((error) => {
+            console.error("Unable to authenticate the collaboration socket:", error);
+            if (nextSocket.readyState === WebSocket.OPEN) {
+              nextSocket.close(1008, "Authentication failed");
+            }
+          });
       };
-      
-      socket.onmessage = (event) => {
+
+      nextSocket.onmessage = (event) => {
         try {
-          const msg = JSON.parse(event.data);
+          const msg = JSON.parse(String(event.data));
+
+          if (msg.type === "authenticated") {
+            if (msg.boardId !== boardId) {
+              nextSocket.close(1008, "Wrong board");
+              return;
+            }
+            reconnectAttempt = 0;
+            wsRef.current = nextSocket;
+            setWsConnected(true);
+            clearPing();
+            pingInterval = setInterval(() => {
+              if (wsRef.current === nextSocket && nextSocket.readyState === WebSocket.OPEN) {
+                nextSocket.send(JSON.stringify({ type: "ping", id: Date.now() }));
+              }
+            }, 15_000);
+            return;
+          }
+
+          if (msg.type === "auth_error") {
+            console.error("Collaboration socket authorization failed:", msg.error || "Unknown error");
+            nextSocket.close(1008, "Authorization failed");
+            return;
+          }
+
+          if (msg.type === "permission_updated") {
+            setBoardData((previous) => previous ? ({
+              ...previous,
+              effectivePermission: msg.permission,
+              effectiveCanWrite: msg.canWrite === true,
+              effectiveCanManage: msg.canManage === true,
+            } as any) : previous);
+            return;
+          }
+
+          // Ignore collaboration traffic until authentication is confirmed.
+          if (wsRef.current !== nextSocket) return;
+
           if (msg.type === "cursor") {
             if (msg.userId === currentUser.id) return;
-            // Track cursor movement from remote collaborator
             const isNew = !socketCollaboratorsRef.current[msg.userId];
             socketCollaboratorsRef.current[msg.userId] = {
               id: msg.userId,
@@ -442,13 +478,10 @@ export default function WhiteboardCanvas({
               panX: msg.panX,
               panY: msg.panY,
               zoom: msg.zoom,
-              lastActive: msg.lastActive
+              lastActive: msg.lastActive,
             };
-            if (isNew) {
-              setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
-            }
+            if (isNew) setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
 
-            // Smooth camera follow logic when actively following a target user
             if (followedUserIdRef.current === msg.userId) {
               const targetZoom = msg.zoom !== undefined ? msg.zoom : 1;
               const containerW = window.innerWidth;
@@ -474,35 +507,36 @@ export default function WhiteboardCanvas({
           } else if (msg.type === "stop_follow") {
             if (currentUser.role !== "teacher") {
               setFollowedUserId(null);
-              showSyncToast(`Teacher has stopped sharing their view.`, "info");
+              showSyncToast("Teacher has stopped sharing their view.", "info");
             }
           } else if (msg.type === "drawing_stream") {
-            // Stream sketch points real-time
             remoteDrawingStreamsRef.current[msg.userId] = {
               points: msg.points,
               color: msg.color,
               width: msg.width,
-              isHighlighter: msg.isHighlighter
+              isHighlighter: msg.isHighlighter,
             };
             remoteDrawingStreamsDirtyRef.current = true;
           } else if (msg.type === "drawing_stream_end") {
-            // Clear stream when finished drawing
             delete remoteDrawingStreamsRef.current[msg.userId];
             remoteDrawingStreamsDirtyRef.current = true;
           } else if (msg.type === "element_update") {
             const { elementId, elementData, actionType, isMerge } = msg;
             setElements((prev) => {
-              let updated: BoardElement[] = [];
+              let updated: BoardElement[];
               if (actionType === "delete") {
-                updated = prev.filter(el => el.id !== elementId);
+                updated = prev.filter((element) => element.id !== elementId);
               } else {
-                const exists = prev.some(el => el.id === elementId);
+                const exists = prev.some((element) => element.id === elementId);
                 if (exists) {
-                  updated = prev.map(el => el.id === elementId ? (isMerge ? { ...el, ...elementData } : { id: elementId, ...elementData }) : el);
+                  updated = prev.map((element) => element.id === elementId
+                    ? (isMerge ? { ...element, ...elementData, id: elementId } : { ...elementData, id: elementId })
+                    : element);
                 } else {
-                  updated = [...prev, { id: elementId, ...elementData } as BoardElement];
+                  updated = [...prev, { ...elementData, id: elementId } as BoardElement];
                 }
               }
+              elementsRef.current = updated;
               scheduleBoardRecoveryCacheSave(boardId, updated);
               return updated;
             });
@@ -512,14 +546,14 @@ export default function WhiteboardCanvas({
               [msg.userId]: {
                 userName: msg.userName,
                 color: msg.color,
-                selectedIds: msg.selectedIds
-              }
+                selectedIds: msg.selectedIds,
+              },
             }));
           } else if (msg.type === "laser_point") {
             if (msg.userId === currentUser.id) return;
             const now = Date.now();
             const existing = remoteLaserPointsRef.current[msg.userId] || [];
-            const active = existing.filter((p) => now - p.timestamp < 1500);
+            const active = existing.filter((point) => now - point.timestamp < 1500);
             remoteLaserPointsRef.current[msg.userId] = [
               ...active,
               {
@@ -531,46 +565,43 @@ export default function WhiteboardCanvas({
             ];
           } else if (msg.type === "timer_sync") {
             setSyncedTimerState(msg.state);
-            if (msg.isOpen !== undefined) {
-              setIsTimerOpen(msg.isOpen);
-            } else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) {
-              setIsTimerOpen(true);
-            }
+            if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
+            else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
           } else if (msg.type === "pong") {
             setWsLatency(Date.now() - msg.id);
           }
-        } catch (err) {
-          console.error("Client WebSocket message parsing error:", err);
+        } catch (error) {
+          console.error("Client WebSocket message parsing error:", error);
         }
       };
-      
-      socket.onclose = () => {
-        console.log("WebSocket disconnected. Retrying in 3s...");
+
+      nextSocket.onclose = () => {
+        if (wsRef.current === nextSocket) wsRef.current = null;
         setWsConnected(false);
         setWsLatency(null);
-        if (pingInterval) clearInterval(pingInterval);
-        reconnectTimer = setTimeout(connect, 3000);
+        clearPing();
+        socketCollaboratorsRef.current = {};
+        setActiveCollaboratorIds([]);
+        setRemoteSelections({});
+        scheduleReconnect();
       };
-      
-      socket.onerror = () => {
+
+      nextSocket.onerror = () => {
         setWsConnected(false);
       };
     };
-    
+
     connect();
-    
+
     return () => {
-      if (socket) {
-        socket.close();
-      }
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-      }
-      if (pingInterval) {
-        clearInterval(pingInterval);
-      }
+      stopped = true;
+      clearPing();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (wsRef.current === socket) wsRef.current = null;
+      if (socket && socket.readyState <= WebSocket.OPEN) socket.close(1000, "Board closed");
     };
-  }, [boardId, currentUser.id]);
+  }, [boardId, currentUser.id, currentUser.role]);
 
   // Keep socket cursors fresh by purging idle collaborators every 5 seconds
   useEffect(() => {
@@ -662,6 +693,25 @@ export default function WhiteboardCanvas({
       setSyncNotification(prev => ({ ...prev, visible: false }));
     }, duration);
   }, []);
+
+  useEffect(() => {
+    const handleSyncStatus = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        boardId?: string;
+        status?: 'synced' | 'saving-cloud' | 'saved-local' | 'offline';
+        message?: string;
+      };
+      if (detail?.boardId !== boardId || !detail.status) return;
+      setSyncStatus(detail.status);
+      hasUnsavedChanges.current = detail.status === 'saved-local' || detail.status === 'offline';
+      if (detail.status === 'offline' && detail.message) {
+        showSyncToast(`Sync failed: ${detail.message}`, 'error', 10000);
+      }
+    };
+
+    window.addEventListener('lucid_spark_sync_status', handleSyncStatus);
+    return () => window.removeEventListener('lucid_spark_sync_status', handleSyncStatus);
+  }, [boardId, showSyncToast]);
 
   const handleSetFollowedUser = React.useCallback(
     (targetId: string | null) => {
@@ -1637,10 +1687,6 @@ export default function WhiteboardCanvas({
         saveSandboxLocalElements(boardId, updatedElements);
       } else {
         scheduleBoardRecoveryCacheSave(boardId, updatedElements);
-      }
-      if (isDrawing) {
-        const fullDrawings = updatedElements.filter(el => el.type === 'drawing') as DrawingElement[];
-        await idbSet(`drawings_${boardId}`, fullDrawings);
       }
     } catch (e) {
       // IndexedDB/Storage error safely handled

@@ -8,6 +8,7 @@ import {
   saveSandboxLocalElements,
 } from '../utils/sandboxGuard';
 import { trackOperation } from '../utils/databaseInstrumentation';
+import { getRealtimeAccessToken } from './realtimeAuth';
 
 export type BoardLoadState = 'idle' | 'loading-manifest' | 'loading-shards' | 'ready' | 'error';
 
@@ -69,6 +70,7 @@ interface BoardControl {
   flushPromise: Promise<void> | null;
   nextFlushRequested: boolean;
   syncSocket: WebSocket | null;
+  syncSocketAuthenticated: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   hydrationPromise: Promise<void>;
   resolveHydration: () => void;
@@ -77,6 +79,21 @@ interface BoardControl {
 }
 
 const activeControls = new Map<string, BoardControl>();
+
+const SYNC_STATUS_EVENT = 'lucid_spark_sync_status';
+
+function emitSyncStatus(
+  boardId: string,
+  status: 'synced' | 'saving-cloud' | 'saved-local' | 'offline',
+  error?: unknown
+): void {
+  if (typeof window === 'undefined') return;
+  const message = error instanceof Error ? error.message : error ? String(error) : undefined;
+  window.dispatchEvent(new CustomEvent(SYNC_STATUS_EVENT, {
+    detail: { boardId, status, message },
+  }));
+}
+
 
 function safeIdbGet(key: string): Promise<any> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
@@ -328,6 +345,7 @@ function createControl(boardId: string): BoardControl {
     flushPromise: null,
     nextFlushRequested: false,
     syncSocket: null,
+    syncSocketAuthenticated: false,
     reconnectTimer: null,
     hydrationPromise,
     resolveHydration,
@@ -438,23 +456,62 @@ function startPersistenceSocket(control: BoardControl): void {
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsUrl = `${protocol}//${window.location.host}/ws`;
+  let reconnectAttempt = 0;
 
   const connect = () => {
     if (control.disposed) return;
     const socket = new WebSocket(wsUrl);
     control.syncSocket = socket;
+    control.syncSocketAuthenticated = false;
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({
-        type: 'join',
-        boardId: control.boardId,
-        userId: `persistence-${auth.currentUser?.uid || crypto.randomUUID()}`,
-      }));
+      void getRealtimeAccessToken()
+        .then((accessToken) => {
+          if (control.disposed || socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify({
+            type: 'authenticate',
+            accessToken,
+            boardId: control.boardId,
+          }));
+        })
+        .catch((error) => {
+          console.error('Unable to authenticate the persistence relay:', error);
+          if (socket.readyState === WebSocket.OPEN) socket.close(1008, 'Authentication failed');
+        });
     };
 
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
+
+        if (message.type === 'authenticated') {
+          if (message.boardId !== control.boardId) {
+            socket.close(1008, 'Wrong board');
+            return;
+          }
+          reconnectAttempt = 0;
+          control.syncSocketAuthenticated = true;
+          return;
+        }
+
+        if (message.type === 'auth_error') {
+          console.error('Persistence relay authorization failed:', message.error || 'Unknown error');
+          socket.close(1008, 'Authorization failed');
+          return;
+        }
+
+        if (message.type === 'permission_updated') {
+          control.boardData = {
+            ...(control.boardData || {}),
+            effectivePermission: message.permission,
+            effectiveCanWrite: message.canWrite === true,
+            effectiveCanManage: message.canManage === true,
+          };
+          notify(control);
+          return;
+        }
+
+        if (!control.syncSocketAuthenticated) return;
         if (message.type !== 'board_manifest_changed' || message.boardId !== control.boardId) return;
         const nextRevision = Number(message.revision || 0);
         if (nextRevision <= control.revision) return;
@@ -481,8 +538,11 @@ function startPersistenceSocket(control: BoardControl): void {
 
     socket.onclose = () => {
       if (control.syncSocket === socket) control.syncSocket = null;
+      control.syncSocketAuthenticated = false;
       if (!control.disposed) {
-        control.reconnectTimer = setTimeout(connect, 1500);
+        const delay = Math.min(10_000, 1_000 * 2 ** Math.min(reconnectAttempt, 3));
+        reconnectAttempt += 1;
+        control.reconnectTimer = setTimeout(connect, delay + Math.floor(Math.random() * 400));
       }
     };
 
@@ -577,16 +637,26 @@ export function subscribeToBoardState(
   };
 }
 
+function runScheduledFlush(control: BoardControl, reason: string): void {
+  emitSyncStatus(control.boardId, 'saving-cloud');
+  void flushBoardCheckpoint(control.boardId, reason)
+    .then(() => emitSyncStatus(control.boardId, 'synced'))
+    .catch((error) => {
+      console.error(`Supabase board checkpoint failed (${reason}):`, error);
+      emitSyncStatus(control.boardId, 'offline', error);
+    });
+}
+
 function scheduleFlush(control: BoardControl): void {
   if (isSandboxEnvironment()) return;
   if (!control.firstMutationTime) control.firstMutationTime = Date.now();
   if (control.idleTimer) clearTimeout(control.idleTimer);
-  control.idleTimer = setTimeout(() => void flushBoardCheckpoint(control.boardId, 'idle-debounce'), IDLE_FLUSH_DELAY);
+  control.idleTimer = setTimeout(() => runScheduledFlush(control, 'idle-debounce'), IDLE_FLUSH_DELAY);
 
   if (!control.maxTimer) {
     const elapsed = Date.now() - control.firstMutationTime;
     control.maxTimer = setTimeout(
-      () => void flushBoardCheckpoint(control.boardId, 'max-interval'),
+      () => runScheduledFlush(control, 'max-interval'),
       Math.max(0, MAX_FLUSH_INTERVAL - elapsed)
     );
   }
@@ -628,6 +698,7 @@ export function queueElementMutation(
   if (action === 'delete') control.currentElements.delete(elementId);
   else if (clean) control.currentElements.set(elementId, clean);
   notify(control);
+  emitSyncStatus(boardId, 'saved-local');
 
   if (isSandboxEnvironment()) {
     saveSandboxLocalElements(boardId, Array.from(control.currentElements.values()));
@@ -724,7 +795,7 @@ export async function flushBoardCheckpoint(boardId: string, _reason: string = 'm
     trackOperation('write', 'supabase-board-manifest', 1);
     notify(control);
 
-    if (control.syncSocket?.readyState === WebSocket.OPEN) {
+    if (control.syncSocketAuthenticated && control.syncSocket?.readyState === WebSocket.OPEN) {
       control.syncSocket.send(JSON.stringify({
         type: 'board_manifest_changed',
         boardId,
@@ -815,6 +886,7 @@ export function disposeBoardPersistence(boardId?: string): void {
     if (control.idleTimer) clearTimeout(control.idleTimer);
     if (control.maxTimer) clearTimeout(control.maxTimer);
     if (control.reconnectTimer) clearTimeout(control.reconnectTimer);
+    control.syncSocketAuthenticated = false;
     if (control.syncSocket) control.syncSocket.close();
     activeControls.delete(id);
   }
