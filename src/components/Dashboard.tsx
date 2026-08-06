@@ -8,6 +8,7 @@ import { isSandboxEnvironment, getSandboxLocalBoards, saveSandboxLocalBoards, sa
 import { trackOperation } from '../utils/databaseInstrumentation';
 import { getBoardPermissions } from '../utils/boardPermissions';
 import { deleteBoardRecoveryCache } from '../utils/boardRecoveryCache';
+import { createSecureBoardShareLink } from '../services/shareLinkService';
 
 interface DashboardProps {
   onSelectBoard: (boardId: string, profile: UserProfile, boardName?: string) => void;
@@ -23,6 +24,39 @@ const COLLABORATOR_COLORS = [
   '#ec4899', '#f43f5e'
 ];
 
+const PRESENCE_FRESH_MS = 150_000;
+
+function isPresenceOnline(record: any, now: number = Date.now()): boolean {
+  return record?.isOnline === true && now - Number(record?.lastActive || 0) < PRESENCE_FRESH_MS;
+}
+
+function sortPresenceRecords(records: any[]): any[] {
+  const now = Date.now();
+  return [...records].sort((a, b) => {
+    const aOnline = isPresenceOnline(a, now);
+    const bOnline = isPresenceOnline(b, now);
+    if (aOnline && !bOnline) return -1;
+    if (!aOnline && bOnline) return 1;
+    return Number(b.lastActive || 0) - Number(a.lastActive || 0);
+  });
+}
+
+async function retryAsync<T>(operation: () => Promise<T>, attempts: number = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await new Promise((resolve) => window.setTimeout(resolve, 300 * attempt));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+
 export default function Dashboard({ 
   onSelectBoard, 
   currentUserProfile, 
@@ -35,6 +69,8 @@ export default function Dashboard({
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
   const PAGE_SIZE = 12;
+  const boardPageCursorsRef = useRef<Record<number, { createdAt: number; id: string } | null>>({ 1: null });
+  const boardListRequestRef = useRef(0);
 
   const [userName, setUserName] = useState('');
   const [userColor, setUserColor] = useState(COLLABORATOR_COLORS[Math.floor(Math.random() * COLLABORATOR_COLORS.length)]);
@@ -72,78 +108,87 @@ export default function Dashboard({
 
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  const rememberedBoardIdsKey = 'lucid_spark_owned_board_ids';
-  const getRememberedBoardIds = (): string[] => {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(rememberedBoardIdsKey) || '[]');
-      return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
-    } catch {
-      return [];
-    }
-  };
-  const rememberBoardId = (boardId: string) => {
-    const ids = getRememberedBoardIds();
-    if (!ids.includes(boardId)) {
-      localStorage.setItem(rememberedBoardIdsKey, JSON.stringify([boardId, ...ids].slice(0, 200)));
-    }
-  };
-  const forgetBoardId = (boardId: string) => {
-    localStorage.setItem(rememberedBoardIdsKey, JSON.stringify(getRememberedBoardIds().filter((id) => id !== boardId)));
-  };
+  const isCloudAnonymousSession = !isSandboxEnvironment() && auth.currentUser?.isAnonymous === true;
+  const canCreateBoards = isSandboxEnvironment() || Boolean(auth.currentUser && !auth.currentUser.isAnonymous);
 
-  // Load presence and settings for admin
+  // Keep the admin panel current only while it is open. PostgreSQL change
+  // events provide fast updates when Realtime replication is enabled; a modest
+  // polling fallback keeps the free-tier deployment accurate without running
+  // dashboard reads in the background.
   useEffect(() => {
-    if (isSandboxEnvironment()) return;
-    const isAdmin = adminClaim;
-    if (!isAdmin) return;
+    if (isSandboxEnvironment() || !adminClaim || !isAdminPanelOpen) return;
 
-    // Listen to admin settings
-    const settingsRef = doc(db, 'admin_settings', 'global');
-    const unsubscribeSettings = onSnapshot(settingsRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (typeof data.appEnabled === 'boolean') {
-          setAdminAppEnabled(data.appEnabled);
-        }
+    let active = true;
+    let refreshDebounce: number | null = null;
+
+    const loadSettings = async () => {
+      const { data, error } = await supabase
+        .from('admin_settings')
+        .select('app_enabled,data')
+        .eq('id', 'global')
+        .maybeSingle();
+      if (!active) return;
+      if (error) {
+        console.error('Settings refresh error:', error);
+        return;
       }
-    }, (err) => {
-      console.error('Settings snapshot error:', err);
-    });
+      const legacyValue = (data?.data as any)?.appEnabled;
+      const nextEnabled = typeof data?.app_enabled === 'boolean'
+        ? data.app_enabled
+        : typeof legacyValue === 'boolean'
+          ? legacyValue
+          : true;
+      setAdminAppEnabled(nextEnabled);
+    };
 
-    // Fetch users presence with pagination
     const fetchPresenceInitial = async () => {
       try {
-        const { limit } = await import('../lib/supabaseDb');
         const presenceRef = collection(db, 'presence');
         const q = query(presenceRef, orderBy('lastActive', 'desc'), limit(50));
         const snapshot = await getDocs(q);
+        if (!active) return;
         const list: any[] = [];
         snapshot.forEach((docSnap) => {
-          list.push({
-            uid: docSnap.id,
-            ...docSnap.data()
-          });
+          list.push({ uid: docSnap.id, ...docSnap.data() });
         });
-        // Sort: online first, then by lastActive descending
-        list.sort((a, b) => {
-          if (a.isOnline && !b.isOnline) return -1;
-          if (!a.isOnline && b.isOnline) return 1;
-          return (b.lastActive || 0) - (a.lastActive || 0);
-        });
-        setPresenceList(list);
+        setPresenceList(sortPresenceRecords(list));
         setLastVisiblePresence(snapshot.docs[snapshot.docs.length - 1] || null);
         setHasMorePresence(snapshot.docs.length === 50);
-      } catch (err) {
-        console.error('Presence fetch error:', err);
+      } catch (error) {
+        if (active) console.error('Presence refresh error:', error);
       }
     };
-    
-    fetchPresenceInitial();
+
+    const refresh = () => {
+      void Promise.all([loadSettings(), fetchPresenceInitial()]);
+    };
+    const scheduleRefresh = () => {
+      if (refreshDebounce !== null) window.clearTimeout(refreshDebounce);
+      refreshDebounce = window.setTimeout(refresh, 250);
+    };
+
+    refresh();
+    const channel = supabase
+      .channel(`admin-panel-${auth.currentUser?.uid || 'admin'}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'presence' }, scheduleRefresh)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'admin_settings', filter: 'id=eq.global' },
+        scheduleRefresh
+      )
+      .subscribe();
+    const poll = window.setInterval(refresh, 30_000);
+    const handleFocus = () => refresh();
+    window.addEventListener('focus', handleFocus);
 
     return () => {
-      unsubscribeSettings();
+      active = false;
+      if (refreshDebounce !== null) window.clearTimeout(refreshDebounce);
+      window.clearInterval(poll);
+      window.removeEventListener('focus', handleFocus);
+      void supabase.removeChannel(channel);
     };
-  }, [currentUserProfile, refreshTrigger]);
+  }, [adminClaim, isAdminPanelOpen, refreshTrigger]);
 
   const handleLoadMorePresence = async () => {
     if (isLoadingMorePresence || !lastVisiblePresence || !hasMorePresence) return;
@@ -169,12 +214,7 @@ export default function Dashboard({
             seen.add(item.uid);
             return true;
           });
-          unique.sort((a, b) => {
-            if (a.isOnline && !b.isOnline) return -1;
-            if (!a.isOnline && b.isOnline) return 1;
-            return (b.lastActive || 0) - (a.lastActive || 0);
-          });
-          return unique;
+          return sortPresenceRecords(unique);
         });
         setLastVisiblePresence(snapshot.docs[snapshot.docs.length - 1] || null);
         setHasMorePresence(snapshot.docs.length === 50);
@@ -224,19 +264,28 @@ export default function Dashboard({
   };
 
   const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canCreateBoards) {
+      alert('Sign in with Google before creating a PDF whiteboard. Guest accounts can only join boards shared with them.');
+      if (pdfInputRef.current) pdfInputRef.current.value = '';
+      return;
+    }
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate absolute size limit of 50MB to prevent memory crash
-    if (file.size > 50 * 1024 * 1024) {
-      alert("This PDF file exceeds the maximum 50MB size limit.");
+    const { MAX_PDF_FILE_BYTES, pdfToImages } = await import('../utils/pdf');
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      alert('Please choose a valid PDF file.');
+      if (pdfInputRef.current) pdfInputRef.current.value = '';
+      return;
+    }
+    if (file.size > MAX_PDF_FILE_BYTES) {
+      alert(`This PDF file exceeds the maximum ${Math.round(MAX_PDF_FILE_BYTES / 1024 / 1024)} MB size limit.`);
       if (pdfInputRef.current) pdfInputRef.current.value = '';
       return;
     }
 
     setIsUploadingPdf(true);
     try {
-      const { pdfToImages } = await import('../utils/pdf');
       const images = await pdfToImages(file);
       setPdfUploadState({
         file,
@@ -246,7 +295,7 @@ export default function Dashboard({
       });
     } catch (err) {
       console.error('Error uploading PDF:', err);
-      alert('Failed to process PDF.');
+      alert(err instanceof Error ? err.message : 'Failed to process PDF.');
     } finally {
       setIsUploadingPdf(false);
       if (pdfInputRef.current) pdfInputRef.current.value = '';
@@ -255,6 +304,18 @@ export default function Dashboard({
 
   const submitPdfBoard = async () => {
     if (!pdfUploadState) return;
+    if (!canCreateBoards) {
+      alert('Sign in with Google before creating a PDF whiteboard.');
+      return;
+    }
+    const selectedIndices = pdfUploadState.images
+      .map((_, index) => index)
+      .filter((index) => pdfUploadState.selectedPages[index]);
+    if (!selectedIndices.length) {
+      alert('Select at least one PDF page before creating the board.');
+      return;
+    }
+
     setIsUploadingPdf(true);
     setPdfStatusText("Preparing PDF pages...");
     let docId = `pdf-${Date.now()}`;
@@ -287,10 +348,11 @@ export default function Dashboard({
           accessMode: 'private',
           editorUids: [],
           viewerUids: [],
+          description: 'PDF Workspace',
           status: 'initializing',
-          schemaVersion: 4,
-          shardLayoutVersion: 3,
-          shardCount: 16,
+          studentId: assignedStudent ? assignedStudent.toLowerCase().replace(/\s+/g, '-') : '',
+          studentName: assignedStudent.trim() || 'All Collaborative',
+          studentsCanWrite: true,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         });
@@ -300,10 +362,6 @@ export default function Dashboard({
       let currentY = 0;
       const gap = 40;
       const pdfBlobMap: Record<string, any> = {};
-
-      const selectedIndices = pdfUploadState.images
-        .map((_, idx) => idx)
-        .filter((idx) => pdfUploadState.selectedPages[idx]);
 
       const totalSelected = selectedIndices.length;
 
@@ -376,7 +434,6 @@ export default function Dashboard({
       } else {
         const { initializeBoardWithElements } = await import('../services/boardPersistence');
         await initializeBoardWithElements(docId, Object.values(pdfBlobMap), boardData);
-        rememberBoardId(docId);
       }
 
       const finalName = userName.trim() || (role === 'teacher' ? 'Teacher' : 'Student-' + Math.floor(Math.random() * 1000));
@@ -404,8 +461,8 @@ export default function Dashboard({
       if (!isSandboxEnvironment()) {
         try {
           const { deleteAllBoardAssets } = await import('../services/storageService');
-          await deleteAllBoardAssets(docId);
-          await deleteDoc(doc(db, 'whiteboards', docId));
+          await retryAsync(() => deleteAllBoardAssets(docId));
+          await retryAsync(() => deleteDoc(doc(db, 'whiteboards', docId)));
         } catch (cleanupErr) {
           console.error('Error cleaning up an incomplete PDF board:', cleanupErr);
         }
@@ -447,14 +504,17 @@ export default function Dashboard({
     }
   }, []);
 
-  // One indexed RPC replaces multiple dashboard board-list queries.
+  // One indexed keyset-paginated RPC replaces multiple dashboard board-list queries.
   const fetchBoards = React.useCallback(async (page: number = 1) => {
+    const normalizedPage = Math.max(1, Math.trunc(page));
+    const requestId = ++boardListRequestRef.current;
+
     if (isSandboxEnvironment()) {
       const loadedBoards = getSandboxLocalBoards().sort((a, b) => b.createdAt - a.createdAt);
-      const startIndex = (page - 1) * PAGE_SIZE;
+      const startIndex = (normalizedPage - 1) * PAGE_SIZE;
       setBoards(loadedBoards.slice(startIndex, startIndex + PAGE_SIZE));
       setHasMore(loadedBoards.length > startIndex + PAGE_SIZE);
-      setCurrentPage(page);
+      setCurrentPage(normalizedPage);
       return;
     }
 
@@ -465,75 +525,92 @@ export default function Dashboard({
       await auth.authStateReady();
       const user = auth.currentUser;
       if (!user) {
+        boardPageCursorsRef.current = { 1: null };
         setAuthError(null);
         setBoards([]);
-        setCurrentPage(page);
+        setCurrentPage(1);
         setHasMore(false);
         return;
       }
       setAuthError(null);
 
-      const requestedLimit = PAGE_SIZE + 1;
-      let rows: any[] = [];
-
-      // Try RPC stored function first
-      const { data: rpcData, error: rpcError } = await supabase.rpc('list_my_boards', {
-        p_limit: requestedLimit,
-        p_offset: (page - 1) * PAGE_SIZE,
-      });
-
-      if (!rpcError && Array.isArray(rpcData)) {
-        rows = rpcData;
-      } else {
-        // Fallback to direct boards table query if RPC is missing in schema cache
-        console.warn('RPC list_my_boards unavailable, trying direct boards table query:', rpcError?.message);
-        
-        const { data: tableData, error: tableError } = await supabase
-          .from('boards')
-          .select('*')
-          .eq('status', 'ready')
-          .order('created_at', { ascending: false })
-          .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
-
-        if (!tableError && Array.isArray(tableData)) {
-          rows = tableData;
-        } else {
-          // If both fail, throw error so user gets clear setup instructions
-          throw new Error(rpcError?.message || tableError?.message || 'Failed to fetch whiteboards.');
-        }
+      if (normalizedPage === 1) {
+        boardPageCursorsRef.current = { 1: null };
+      }
+      const cursor = boardPageCursorsRef.current[normalizedPage] ?? null;
+      if (normalizedPage > 1 && !cursor) {
+        throw new Error('The requested dashboard page cursor is unavailable. Return to page 1 and try again.');
       }
 
-      const loadedBoards = rows.slice(0, PAGE_SIZE).map((row: any) => ({
-        ...(row.data || {}),
-        id: row.id,
-        name: row.name || 'Untitled Board',
-        description: row.description || '',
-        createdAt: Number(row.created_at || 0),
-        updatedAt: Number(row.updated_at || 0),
-        createdBy: row.created_by || 'Unknown',
-        ownerUid: row.owner_uid,
-        accessMode: row.access_mode,
-        editorUids: row.editor_uids || [],
-        viewerUids: row.viewer_uids || [],
-        status: row.status,
-        studentId: row.student_id || '',
-        studentName: row.student_name || '',
-        studentsCanWrite: row.students_can_write !== false,
-        schemaVersion: Number(row.schema_version || 4),
-        shardLayoutVersion: Number(row.shard_layout_version || 3),
-        shardCount: Number(row.shard_count || 16),
-        currentRevision: Number(row.current_revision || 0),
-        totalElements: Number(row.total_elements || 0),
-      })) as Whiteboard[];
+      const requestedLimit = PAGE_SIZE + 1;
+      const { data: rpcData, error: rpcError } = await supabase.rpc('list_my_boards_page', {
+        p_limit: requestedLimit,
+        p_before_created_at: cursor?.createdAt ?? null,
+        p_before_id: cursor?.id ?? null,
+      });
 
-      trackOperation('read', 'dashboard-board-list-rpc', loadedBoards.length);
+      if (rpcError || !Array.isArray(rpcData)) {
+        throw new Error(
+          rpcError?.message ||
+          'The secure list_my_boards_page RPC is unavailable. Apply the current Supabase migrations before deploying this client.'
+        );
+      }
+      if (requestId !== boardListRequestRef.current) return;
+
+      const pageRows = rpcData.slice(0, PAGE_SIZE);
+      const loadedBoards = pageRows.map((row: any) => {
+        const effectivePermission = String(row.effective_permission || 'none').toLowerCase() as Whiteboard['effectivePermission'];
+        const studentsCanWrite = row.students_can_write !== false;
+        return {
+          id: row.id,
+          name: row.name || 'Untitled Board',
+          description: row.description || '',
+          createdAt: Number(row.created_at || 0),
+          updatedAt: Number(row.updated_at || 0),
+          createdBy: row.created_by || 'Unknown',
+          ownerUid: row.owner_uid,
+          accessMode: row.access_mode,
+          editorUids: [],
+          viewerUids: [],
+          status: row.status,
+          studentId: row.student_id || '',
+          studentName: row.student_name || '',
+          studentsCanWrite,
+          schemaVersion: Number(row.schema_version || 4),
+          shardLayoutVersion: Number(row.shard_layout_version || 3),
+          shardCount: Number(row.shard_count || 16),
+          currentRevision: Number(row.current_revision || 0),
+          totalElements: Number(row.total_elements || 0),
+          effectivePermission,
+          effectiveCanWrite:
+            effectivePermission === 'owner' ||
+            effectivePermission === 'admin' ||
+            (effectivePermission === 'editor' && studentsCanWrite),
+          effectiveCanManage: effectivePermission === 'owner' || effectivePermission === 'admin',
+          legacyLinkDisabled: row.legacy_link_disabled === true,
+        } satisfies Whiteboard;
+      });
+
+      const lastBoard = loadedBoards[loadedBoards.length - 1];
+      if (lastBoard && rpcData.length > PAGE_SIZE) {
+        boardPageCursorsRef.current[normalizedPage + 1] = {
+          createdAt: lastBoard.createdAt,
+          id: lastBoard.id,
+        };
+      } else {
+        delete boardPageCursorsRef.current[normalizedPage + 1];
+      }
+
+      trackOperation('read', 'dashboard-board-list-page-rpc', loadedBoards.length);
       setBoards(loadedBoards);
-      setCurrentPage(page);
-      setHasMore(rows.length > PAGE_SIZE);
+      setCurrentPage(normalizedPage);
+      setHasMore(rpcData.length > PAGE_SIZE);
     } catch (err) {
+      if (requestId !== boardListRequestRef.current) return;
       console.error('Error fetching whiteboards:', err);
       setAuthError(err instanceof Error ? err.message : String(err));
       setBoards([]);
+      setHasMore(false);
     }
   }, []);
 
@@ -556,6 +633,10 @@ export default function Dashboard({
   const handleCreateBoard = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBoardName.trim()) return;
+    if (!canCreateBoards) {
+      alert('Sign in with Google before creating a whiteboard. Guest accounts can only join boards shared with them.');
+      return;
+    }
 
     const finalUserName = userName.trim() || 'Anonymous User';
     let ownerUid = 'anonymous';
@@ -611,7 +692,6 @@ export default function Dashboard({
       const docRef = await addDoc(collection(db, 'whiteboards'), newBoardData);
       trackOperation('write', 'dashboard-create-board', 1);
 
-      rememberBoardId(docRef.id);
       const createdBoardObj = { id: docRef.id, ...newBoardData };
       setBoards((prev) => [createdBoardObj as any, ...prev]);
       setNewBoardName('');
@@ -624,6 +704,10 @@ export default function Dashboard({
   };
 
   const handleStudentQuickCreate = async () => {
+    if (!canCreateBoards) {
+      alert('Sign in with Google before creating a whiteboard. Guest accounts can only join boards shared with them.');
+      return;
+    }
     const name = prompt("Enter a name for your new whiteboard:", "My Practice Whiteboard");
     if (!name || !name.trim()) return;
 
@@ -685,7 +769,6 @@ export default function Dashboard({
       const docRef = await addDoc(collection(db, 'whiteboards'), newBoardData);
       
       trackOperation('write', 'dashboard-create-board-student', 1);
-      rememberBoardId(docRef.id);
 
       const createdBoardObj = { id: docRef.id, ...newBoardData };
       setBoards((prev) => [createdBoardObj as any, ...prev]);
@@ -705,13 +788,9 @@ export default function Dashboard({
     const targetId = boardToDelete;
     setBoardToDelete(null);
 
-    let originalIndex = -1;
-    let originalBoardObj: Whiteboard | null = null;
-    setBoards((prev) => {
-      originalIndex = prev.findIndex((board) => board.id === targetId);
-      if (originalIndex !== -1) originalBoardObj = prev[originalIndex];
-      return prev.filter((board) => board.id !== targetId);
-    });
+    const originalIndex = boards.findIndex((board) => board.id === targetId);
+    const originalBoardObj: Whiteboard | null = originalIndex >= 0 ? boards[originalIndex] : null;
+    setBoards((prev) => prev.filter((board) => board.id !== targetId));
 
     if (isSandboxEnvironment()) {
       saveSandboxLocalBoards(getSandboxLocalBoards().filter((board) => board.id !== targetId));
@@ -720,12 +799,12 @@ export default function Dashboard({
       return;
     }
 
+    let removedAssetCount = 0;
     try {
       const { deleteAllBoardAssets } = await import('../services/storageService');
-      await deleteAllBoardAssets(targetId);
-      await deleteDoc(doc(db, 'whiteboards', targetId));
+      removedAssetCount = await retryAsync(() => deleteAllBoardAssets(targetId));
+      await retryAsync(() => deleteDoc(doc(db, 'whiteboards', targetId)));
       await deleteBoardRecoveryCache(targetId);
-      forgetBoardId(targetId);
       trackOperation('delete', 'supabase-board-delete-cascade', 1);
     } catch (err) {
       console.error('Error deleting board:', err);
@@ -738,7 +817,10 @@ export default function Dashboard({
           return restored;
         });
       }
-      alert(`Failed to delete board: ${err instanceof Error ? err.message : String(err)}`);
+      const assetWarning = removedAssetCount > 0
+        ? ' Some uploaded assets were already removed; retry deletion before continuing to use this board.'
+        : '';
+      alert(`Failed to delete the board after three attempts. It has been restored in the list.${assetWarning} ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -777,17 +859,7 @@ export default function Dashboard({
         }
 
         const shareRole = board.studentsCanWrite === false ? 'viewer' : 'editor';
-        const { data, error } = await supabase.rpc('create_board_share_link', {
-          p_board_id: board.id,
-          p_role: shareRole,
-          p_expires_at: null,
-        });
-        if (error) throw new Error(error.message);
-
-        const payload = data as any;
-        const rawToken = String(payload?.rawToken || payload?.raw_token || '');
-        if (!rawToken) throw new Error('Supabase did not return a sharing token.');
-
+        const rawToken = await createSecureBoardShareLink(board.id, shareRole);
         link = `${window.location.origin}/#share=${encodeURIComponent(rawToken)}`;
         setBoards((current) => current.map((item) =>
           item.id === board.id ? { ...item, accessMode: 'shared' } : item
@@ -874,7 +946,7 @@ export default function Dashboard({
               <p className="text-xs text-amber-700 leading-relaxed font-mono bg-amber-100/50 p-2 rounded border border-amber-200/60">
                 {authError}
               </p>
-              {authError.includes('function public.list_my_boards') || authError.includes('schema cache') || authError.includes('does not exist') ? (
+              {authError.includes('function public.list_my_boards_page') || authError.includes('function public.list_my_boards') || authError.includes('schema cache') || authError.includes('does not exist') ? (
                 <div className="text-xs text-amber-900 bg-amber-100/80 p-3 rounded-lg border border-amber-200/80 space-y-1.5">
                   <p className="font-semibold text-amber-900 flex items-center gap-1.5">
                     💡 How to Fix: Run Schema SQL in Supabase
@@ -1092,7 +1164,7 @@ export default function Dashboard({
               <button
                 type="button"
                 onClick={() => pdfInputRef.current?.click()}
-                disabled={isUploadingPdf}
+                disabled={isUploadingPdf || !canCreateBoards}
                 className="w-full bg-indigo-50 hover:bg-indigo-100 active:bg-indigo-200 text-indigo-700 border border-indigo-200 font-semibold py-2.5 rounded-lg shadow-sm transition-all text-xs flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-70 disabled:cursor-wait"
               >
                 {isUploadingPdf ? (
@@ -1103,14 +1175,20 @@ export default function Dashboard({
                 ) : (
                   <>
                     <FileUp className="w-3.5 h-3.5" />
-                    <span>Upload & Create PDF Board</span>
+                    <span>{canCreateBoards ? 'Upload & Create PDF Board' : 'Google Sign-In Required'}</span>
                   </>
                 )}
               </button>
             </div>
           )}
 
-          {/* Teacher Board Creation Tool (Available to anyone, but tailored for layout separation) */}
+          {isCloudAnonymousSession && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              Guest sessions can collaborate through secure share links. Sign in with Google to create or import boards.
+            </div>
+          )}
+
+          {/* Teacher Board Creation Tool */}
           {role === 'teacher' && (
             <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm relative overflow-hidden">
               <div className="absolute top-0 right-0 w-24 h-24 bg-blue-600/5 rounded-full blur-2xl -mr-6 -mt-6"></div>
@@ -1163,10 +1241,11 @@ export default function Dashboard({
 
                 <button
                   type="submit"
-                  className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-2.5 rounded-lg shadow-sm transition-all text-xs flex items-center justify-center space-x-2 cursor-pointer mt-2"
+                  disabled={!canCreateBoards}
+                  className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-semibold py-2.5 rounded-lg shadow-sm transition-all text-xs flex items-center justify-center space-x-2 cursor-pointer mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>Deploy New Whiteboard</span>
+                  <span>{canCreateBoards ? 'Deploy New Whiteboard' : 'Google Sign-In Required'}</span>
                 </button>
               </form>
             </div>
@@ -1219,10 +1298,11 @@ export default function Dashboard({
             {role === 'student' && (
               <button
                 onClick={handleStudentQuickCreate}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg font-bold text-xs shadow-sm transition-all flex items-center space-x-1 cursor-pointer"
+                disabled={!canCreateBoards}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg font-bold text-xs shadow-sm transition-all flex items-center space-x-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>Create New Board</span>
+                <span>{canCreateBoards ? 'Create New Board' : 'Google Sign-In Required'}</span>
               </button>
             )}
           </div>
@@ -1526,7 +1606,7 @@ export default function Dashboard({
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Active Cursors / Online Now</span>
                   <div className="flex items-baseline gap-2 mt-2">
                     <span className="text-3xl font-black text-slate-900">
-                      {presenceList.filter(u => u.isOnline && (Date.now() - (u.lastActive || 0) < 60000)).length}
+                      {presenceList.filter((user) => isPresenceOnline(user)).length}
                     </span>
                     <span className="text-xs text-emerald-600 font-bold flex items-center">
                       <span className="w-2 h-2 rounded-full bg-emerald-500 mr-1 animate-pulse"></span>
@@ -1591,7 +1671,7 @@ export default function Dashboard({
                   <div className="flex items-center justify-between gap-2">
                     <div>
                       <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Accessible Board Inventory</h4>
-                      <p className="text-[10px] text-slate-500 mt-0.5">Loaded by one indexed <code className="bg-slate-200/80 px-1 py-0.5 rounded font-mono">list_my_boards</code> RPC.</p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">Loaded by one indexed <code className="bg-slate-200/80 px-1 py-0.5 rounded font-mono">list_my_boards_page</code> RPC.</p>
                     </div>
                     <span className="text-[10px] bg-white border border-slate-200 text-slate-600 px-2.5 py-1 rounded-md font-semibold">{boards.length} on this page</span>
                   </div>
@@ -1741,7 +1821,7 @@ export default function Dashboard({
                               );
                             })
                             .map((u) => {
-                              const isActuallyOnline = u.isOnline && (Date.now() - (u.lastActive || 0) < 60000);
+                              const isActuallyOnline = isPresenceOnline(u);
                               return (
                                 <tr key={u.uid} className="hover:bg-slate-50/50 transition-colors">
                                   <td className="p-4">

@@ -1,5 +1,12 @@
 import { auth, googleProvider, supabase, toCompatAuthUser, type CompatAuthUser } from '../supabase';
-import { migrateLegacyBoardCachesToIndexedDb } from '../utils/boardRecoveryCache';
+import {
+  clearBoardRecoveryIdentity,
+  clearCurrentUserBoardRecoveryCaches,
+  hasCurrentUserPendingMutationCaches,
+  migrateLegacyBoardCachesToIndexedDb,
+} from '../utils/boardRecoveryCache';
+import { closeAllBoardSockets } from '../services/boardSocketService';
+import { clearAssetCache } from '../services/storageService';
 
 export type Unsubscribe = () => void;
 
@@ -65,6 +72,43 @@ export function getAuthErrorDetails(error: unknown): Record<string, unknown> {
   };
 }
 
+async function prepareForAuthIdentityExit(reason: string): Promise<boolean> {
+  try {
+    const persistence = await import('../services/boardPersistence');
+    const result = await persistence.flushAllBoardCheckpoints(reason);
+    const hasDetachedPendingEdits = await hasCurrentUserPendingMutationCaches();
+    const canClearRecoveryCaches = result.flushed && !hasDetachedPendingEdits;
+
+    if (!result.flushed) {
+      console.warn('Preserved unsynced recovery data for boards:', result.pendingBoards);
+    } else if (hasDetachedPendingEdits) {
+      console.warn('Preserved detached unsynced recovery data for the current account.');
+    }
+
+    // Keep the current board session alive when the identity change is being
+    // blocked. This lets a guest reconnect and finish syncing instead of losing
+    // the only session that can access its user-scoped recovery queue.
+    if (!canClearRecoveryCaches) return false;
+
+    persistence.disposeBoardPersistence();
+    closeAllBoardSockets();
+    clearAssetCache();
+    await clearCurrentUserBoardRecoveryCaches();
+    return true;
+  } catch (error) {
+    console.warn('Could not drain pending whiteboard checkpoints before changing accounts.', error);
+    return false;
+  }
+}
+
+function discardInMemoryBoardStateAfterExternalIdentityChange(): void {
+  closeAllBoardSockets();
+  clearAssetCache();
+  void import('../services/boardPersistence')
+    .then(({ disposeBoardPersistence }) => disposeBoardPersistence())
+    .catch((error) => console.warn('Unable to clear in-memory board state after account change.', error));
+}
+
 export function onAuthStateChanged(
   _auth: typeof auth,
   callback: (user: CompatAuthUser | null) => void
@@ -90,8 +134,13 @@ export function onAuthStateChanged(
   };
 
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    const previousUserId = auth.currentUser?.uid || null;
+    const nextUserId = session?.user?.id || null;
     const compatUser = toCompatAuthUser(session?.user || null);
     auth.setCurrentUser(session?.user || null);
+    if (previousUserId && previousUserId !== nextUserId) {
+      discardInMemoryBoardStateAfterExternalIdentityChange();
+    }
 
     if (compatUser && !compatUser.isAnonymous) {
       clearOAuthIntent();
@@ -160,6 +209,10 @@ export async function signInWithPopup(
     if (sessionError) throw sessionError;
 
     if (sessionData.session?.user?.is_anonymous) {
+      const canLeaveGuestSession = await prepareForAuthIdentityExit('guest-to-google');
+      if (!canLeaveGuestSession) {
+        throw new Error('Unsynced guest edits are still waiting for the cloud. Reconnect and wait for Cloud: Synced before switching to Google.');
+      }
       const { error: signOutError } = await supabase.auth.signOut({ scope: 'local' });
       if (signOutError) throw signOutError;
       auth.setCurrentUser(null);
@@ -181,12 +234,22 @@ export async function signInWithPopup(
 
 export async function signOut(_auth: typeof auth): Promise<void> {
   clearOAuthIntent();
+  const wasAnonymous = auth.currentUser?.isAnonymous === true;
+  const canLeaveCurrentSession = await prepareForAuthIdentityExit('sign-out');
+  if (wasAnonymous && !canLeaveCurrentSession) {
+    throw new Error('Unsynced guest edits are still waiting for the cloud. Reconnect and wait for Cloud: Synced before signing out.');
+  }
+
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
   auth.setCurrentUser(null);
+  clearBoardRecoveryIdentity();
 }
 
-export async function signInAnonymously(_auth: typeof auth): Promise<{ user: CompatAuthUser }> {
+export async function signInAnonymously(
+  _auth: typeof auth,
+  captchaToken?: string
+): Promise<{ user: CompatAuthUser }> {
   await auth.authStateReady();
 
   if (auth.currentUser) {
@@ -203,7 +266,9 @@ export async function signInAnonymously(_auth: typeof auth): Promise<{ user: Com
   if (anonymousSignInPromise) return anonymousSignInPromise;
 
   anonymousSignInPromise = (async () => {
-    const { data, error } = await supabase.auth.signInAnonymously();
+    const { data, error } = await supabase.auth.signInAnonymously(
+      captchaToken ? { options: { captchaToken } } : undefined
+    );
     if (error) throw error;
 
     const user = toCompatAuthUser(data.user);

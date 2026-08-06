@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { ShapeElement, UserProfile, ShapeType } from "../types";
+import { evaluateSafeMathExpression, parseGraphRelation } from "../utils/mathExpression";
 import {
   Smile,
   Trash2,
@@ -33,114 +34,20 @@ function evaluateMathExpression(
   xVal: number,
   vars: Record<string, { val: number }> = {}
 ): number | null {
-  try {
-    let clean = expr.trim().toLowerCase();
-    if (clean.startsWith("y=")) clean = clean.substring(2);
-    else if (clean.startsWith("y =")) clean = clean.substring(3);
-    else if (clean.startsWith("f(x)=")) clean = clean.substring(5);
-    else if (clean.startsWith("f(x) =")) clean = clean.substring(6);
-
-    clean = clean.trim();
-    if (!clean) return null;
-
-    if (clean.startsWith("x=") || clean.startsWith("x =")) {
-      return null; // Handled separately as a vertical line
-    }
-
-    // Substitute dynamic variable values (a, b, c, m, k, etc.)
-    if (vars) {
-      Object.keys(vars).forEach((vName) => {
-        const valObj = vars[vName];
-        if (valObj && typeof valObj.val === "number") {
-          const regex = new RegExp(`\\b(${vName})\\b`, "g");
-          clean = clean.replace(regex, `(${valObj.val})`);
-        }
-      });
-    }
-
-    // Replace algebraic 'x' with actual numeric value inside parenthesis
-    let formula = clean.replace(/\b(x)\b/g, `(${xVal})`);
-
-    // Replace exponents ^ with JS operator **
-    formula = formula.replace(/\^/g, "**");
-
-    // Add implicit multiplication, e.g. "2(" -> "2*(", "2x" -> "2*x"
-    formula = formula.replace(/(\d|\))\s*\(|(\d)\s*([a-z])|([a-z])\s*(\d)/gi, (m, p1, p2, p3, p4, p5) => {
-      if (p1) return `${p1}*(`;
-      if (p2 && p3) return `${p2}*${p3}`;
-      if (p4 && p5) return `${p4}*${p5}`;
-      return m;
-    });
-
-    // Support key common math functions & constants
-    formula = formula.replace(/\basin\b/g, "Math.asin");
-    formula = formula.replace(/\bacos\b/g, "Math.acos");
-    formula = formula.replace(/\batan\b/g, "Math.atan");
-    formula = formula.replace(/\bsin\b/g, "Math.sin");
-    formula = formula.replace(/\bcos\b/g, "Math.cos");
-    formula = formula.replace(/\btan\b/g, "Math.tan");
-    formula = formula.replace(/\babs\b/g, "Math.abs");
-    formula = formula.replace(/\bsqrt\b/g, "Math.sqrt");
-    formula = formula.replace(/\blog\b/g, "Math.log10");
-    formula = formula.replace(/\bln\b/g, "Math.log");
-    formula = formula.replace(/\bpi\b/g, "Math.PI");
-    formula = formula.replace(/\be\b/g, "Math.E");
-
-    // Strictly validate expression elements to prevent XSS or malicious execution
-    const sanitizedFormula = formula.replace(
-      /[^0-9+\-*/().\s*Math\.sincostanabsasinacosatanloglnsqrtPIE]/g,
-      ""
-    );
-
-    const result = new Function(`return (${sanitizedFormula})`)();
-    if (typeof result === "number" && !isNaN(result) && isFinite(result)) {
-      return result;
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-/**
- * Parses inequalities like y <= 2x + 1 or y > sin(x)
- */
-function parseInequality(expr: string) {
   let clean = expr.trim().toLowerCase();
-  if (clean.startsWith("f(x)")) clean = clean.substring(4).trim();
+  if (/^y\s*=/.test(clean)) clean = clean.replace(/^y\s*=\s*/, "");
+  else if (/^f\(x\)\s*=/.test(clean)) clean = clean.replace(/^f\(x\)\s*=\s*/, "");
+  if (!clean || /^x\s*=/.test(clean)) return null;
 
-  let op: "<=" | "<" | ">=" | ">" | null = null;
-  let subExpr = clean;
-
-  if (clean.includes("<=")) {
-    op = "<=";
-    subExpr = clean.split("<=")[1] || "";
-  } else if (clean.includes("\le")) {
-    op = "<=";
-    subExpr = clean.split("\le")[1] || "";
-  } else if (clean.includes("<")) {
-    op = "<";
-    subExpr = clean.split("<")[1] || "";
-  } else if (clean.includes(">=")) {
-    op = ">=";
-    subExpr = clean.split(">=")[1] || "";
-  } else if (clean.includes("\ge")) {
-    op = ">=";
-    subExpr = clean.split("\ge")[1] || "";
-  } else if (clean.includes(">")) {
-    op = ">";
-    subExpr = clean.split(">")[1] || "";
+  const variables: Record<string, number> = { x: xVal };
+  for (const [name, config] of Object.entries(vars || {})) {
+    if (config && typeof config.val === "number") variables[name] = config.val;
   }
-
-  if (op) {
-    if (subExpr.startsWith("y")) subExpr = subExpr.substring(1).trim();
-    if (subExpr.startsWith("=")) subExpr = subExpr.substring(1).trim();
-    const isStrict = op === "<" || op === ">";
-    return { isInequality: true, op, isStrict, cleanExpr: subExpr.trim() };
-  }
-
-  return { isInequality: false, op: null, isStrict: false, cleanExpr: expr };
+  return evaluateSafeMathExpression(clean, variables);
 }
+
+/** Parses explicit equations and y-based inequalities for graph rendering. */
+const parseInequality = parseGraphRelation;
 
 /**
  * Evaluates implicit 2D equations in x and y (e.g. x^2 + y^2 = 25 or x^2/9 + y^2/4 = 1)
@@ -151,47 +58,18 @@ function evaluateImplicit2D(
   yVal: number,
   vars: Record<string, { val: number }> = {}
 ): number | null {
-  try {
-    let clean = expr.trim().toLowerCase();
-    if (!clean.includes("=")) return null;
+  const parts = expr.trim().toLowerCase().split("=");
+  if (parts.length !== 2) return null;
 
-    const parts = clean.split("=");
-    if (parts.length !== 2) return null;
-
-    let lhs = parts[0].trim();
-    let rhs = parts[1].trim();
-
-    // Substitute variables
-    if (vars) {
-      Object.keys(vars).forEach((vName) => {
-        const valObj = vars[vName];
-        if (valObj && typeof valObj.val === "number") {
-          const regex = new RegExp(`\\b(${vName})\\b`, "g");
-          lhs = lhs.replace(regex, `(${valObj.val})`);
-          rhs = rhs.replace(regex, `(${valObj.val})`);
-        }
-      });
-    }
-
-    lhs = lhs.replace(/\b(x)\b/g, `(${xVal})`).replace(/\b(y)\b/g, `(${yVal})`);
-    rhs = rhs.replace(/\b(x)\b/g, `(${xVal})`).replace(/\b(y)\b/g, `(${yVal})`);
-
-    lhs = lhs.replace(/\^/g, "**").replace(/\bpi\b/g, "Math.PI").replace(/\bsin\b/g, "Math.sin").replace(/\bcos\b/g, "Math.cos");
-    rhs = rhs.replace(/\^/g, "**").replace(/\bpi\b/g, "Math.PI").replace(/\bsin\b/g, "Math.sin").replace(/\bcos\b/g, "Math.cos");
-
-    const sanitizedLhs = lhs.replace(/[^0-9+\-*/().\s*Math\.sincostanabsasinacosatanloglnsqrtPIE]/g, "");
-    const sanitizedRhs = rhs.replace(/[^0-9+\-*/().\s*Math\.sincostanabsasinacosatanloglnsqrtPIE]/g, "");
-
-    const valLhs = new Function(`return (${sanitizedLhs})`)();
-    const valRhs = new Function(`return (${sanitizedRhs})`)();
-
-    if (typeof valLhs === "number" && typeof valRhs === "number" && !isNaN(valLhs) && !isNaN(valRhs)) {
-      return valLhs - valRhs;
-    }
-    return null;
-  } catch (e) {
-    return null;
+  const variables: Record<string, number> = { x: xVal, y: yVal };
+  for (const [name, config] of Object.entries(vars || {})) {
+    if (config && typeof config.val === "number") variables[name] = config.val;
   }
+
+  const left = evaluateSafeMathExpression(parts[0], variables);
+  const right = evaluateSafeMathExpression(parts[1], variables);
+  if (left === null || right === null) return null;
+  return left - right;
 }
 
 /**

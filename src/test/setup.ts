@@ -49,17 +49,22 @@ if (typeof window !== 'undefined') {
         beginPath: vi.fn(),
         moveTo: vi.fn(),
         lineTo: vi.fn(),
+        quadraticCurveTo: vi.fn(),
+        bezierCurveTo: vi.fn(),
         closePath: vi.fn(),
         stroke: vi.fn(),
+        strokeRect: vi.fn(),
         translate: vi.fn(),
         scale: vi.fn(),
         rotate: vi.fn(),
         arc: vi.fn(),
+        ellipse: vi.fn(),
         fill: vi.fn(),
         measureText: vi.fn(() => ({ width: 0 })),
         transform: vi.fn(),
         rect: vi.fn(),
         clip: vi.fn(),
+        setLineDash: vi.fn(),
       };
     }
     return null;

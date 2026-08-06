@@ -1,11 +1,13 @@
-import React, { useState, useRef, useEffect } from "react";
-import { Mic, Square, Play, Pause, Trash2, Check, X, Volume2 } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { Mic, Square, Play, Pause, Trash2, Check, X } from "lucide-react";
 
 interface VoiceRecordModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSaveAudio: (audioDataUrl: string, durationSec: number) => void;
 }
+
+const MAX_RECORDING_SECONDS = 5 * 60;
 
 export default function VoiceRecordModal({
   isOpen,
@@ -19,68 +21,152 @@ export default function VoiceRecordModal({
   const [isPlaying, setIsPlaying] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<any>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+  }, []);
+
+  const stopMediaTracks = useCallback(() => {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }, []);
+
+  const releasePreview = useCallback(() => {
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+    setIsPlaying(false);
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+    blobUrlRef.current = null;
+    setAudioBlobUrl(null);
+  }, []);
+
+  const stopRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+    setIsRecording(false);
+    clearTimer();
+  }, [clearTimer]);
+
+  const cleanup = useCallback(() => {
+    clearTimer();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      recorder.stop();
+    }
+    mediaRecorderRef.current = null;
+    stopMediaTracks();
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+    blobUrlRef.current = null;
+  }, [clearTimer, stopMediaTracks]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      mountedRef.current = false;
+      cleanup();
     };
-  }, []);
+  }, [cleanup]);
+
+  useEffect(() => {
+    if (!isOpen) cleanup();
+  }, [isOpen, cleanup]);
 
   if (!isOpen) return null;
 
   const startRecording = async () => {
     try {
+      releasePreview();
+      setAudioBase64(null);
+      setRecordingTime(0);
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
+      const preferredMimeType = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+      ].find((type) => typeof MediaRecorder.isTypeSupported !== "function" || MediaRecorder.isTypeSupported(type));
+      if (!preferredMimeType) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error('This browser cannot record in a supported WebM or Ogg audio format.');
+      }
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: preferredMimeType });
+
+      mediaStreamRef.current = stream;
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
 
       mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        clearTimer();
+        stopMediaTracks();
+        mediaRecorderRef.current = null;
+        if (!mountedRef.current) return;
+
+        const mimeType = mediaRecorder.mimeType || audioChunksRef.current[0]?.type || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        if (!audioBlob.size) {
+          setAudioBase64(null);
+          return;
+        }
+
+        releasePreview();
         const url = URL.createObjectURL(audioBlob);
+        blobUrlRef.current = url;
         setAudioBlobUrl(url);
 
         const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
         reader.onloadend = () => {
-          setAudioBase64(reader.result as string);
+          if (mountedRef.current && typeof reader.result === "string") setAudioBase64(reader.result);
         };
-
-        // Stop all audio track streams
-        stream.getTracks().forEach((track) => track.stop());
+        reader.onerror = () => {
+          if (mountedRef.current) setAudioBase64(null);
+        };
+        reader.readAsDataURL(audioBlob);
       };
 
-      mediaRecorder.start();
+      mediaRecorder.start(1_000);
       setIsRecording(true);
-      setRecordingTime(0);
-
       timerRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
-      }, 1000);
-    } catch (err) {
-      console.error("Microphone access error:", err);
-      alert("Microphone access was denied or is unavailable on this device.");
+        setRecordingTime((previous) => {
+          const next = Math.min(previous + 1, MAX_RECORDING_SECONDS);
+          if (next >= MAX_RECORDING_SECONDS) {
+            const activeRecorder = mediaRecorderRef.current;
+            if (activeRecorder && activeRecorder.state !== "inactive") activeRecorder.stop();
+            setIsRecording(false);
+            clearTimer();
+          }
+          return next;
+        });
+      }, 1_000);
+    } catch (error) {
+      stopMediaTracks();
+      console.error("Microphone access error:", error);
+      alert(error instanceof Error
+        ? error.message
+        : "Microphone access was denied or is unavailable on this device.");
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      if (timerRef.current) clearInterval(timerRef.current);
-    }
-  };
-
-  const togglePreview = () => {
+  const togglePreview = async () => {
     if (!audioBlobUrl) return;
     if (!previewAudioRef.current) {
       const audio = new Audio(audioBlobUrl);
@@ -92,22 +178,37 @@ export default function VoiceRecordModal({
       previewAudioRef.current.pause();
       setIsPlaying(false);
     } else {
-      previewAudioRef.current.play();
-      setIsPlaying(true);
+      try {
+        await previewAudioRef.current.play();
+        setIsPlaying(true);
+      } catch (error) {
+        console.warn("Audio preview could not start.", error);
+      }
     }
+  };
+
+  const resetRecording = () => {
+    releasePreview();
+    setAudioBase64(null);
+    setRecordingTime(0);
   };
 
   const handleConfirm = () => {
-    if (audioBase64) {
-      onSaveAudio(audioBase64, recordingTime);
-      onClose();
-    }
+    if (!audioBase64) return;
+    onSaveAudio(audioBase64, recordingTime);
+    cleanup();
+    onClose();
   };
 
-  const formatTime = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  const handleClose = () => {
+    cleanup();
+    onClose();
+  };
+
+  const formatTime = (seconds: number) => {
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+    return `${minutes}:${remainder < 10 ? "0" : ""}${remainder}`;
   };
 
   return (
@@ -118,22 +219,24 @@ export default function VoiceRecordModal({
             <Mic className="w-5 h-5" />
             <span className="font-extrabold text-sm text-slate-800">Record Voice Comment</span>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-600">
+          <button onClick={handleClose} className="p-1 rounded-lg text-slate-400 hover:text-slate-600" aria-label="Close voice recorder">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Timer / Waveform Display */}
         <div className="flex flex-col items-center justify-center p-6 bg-slate-50 border border-slate-200/80 rounded-2xl w-full space-y-2">
           <span className="text-3xl font-black font-mono text-slate-800 tracking-wider">
             {formatTime(recordingTime)}
           </span>
           <span className="text-xs text-slate-400 font-medium">
-            {isRecording ? "Recording in progress..." : audioBase64 ? "Recording complete!" : "Ready to record"}
+            {isRecording
+              ? `Recording in progress… (maximum ${Math.floor(MAX_RECORDING_SECONDS / 60)} minutes)`
+              : audioBase64
+                ? "Recording complete!"
+                : "Ready to record"}
           </span>
         </div>
 
-        {/* Action Controls */}
         <div className="flex items-center space-x-4">
           {!isRecording && !audioBase64 && (
             <button
@@ -165,11 +268,7 @@ export default function VoiceRecordModal({
                 {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
               </button>
               <button
-                onClick={() => {
-                  setAudioBase64(null);
-                  setAudioBlobUrl(null);
-                  setRecordingTime(0);
-                }}
+                onClick={resetRecording}
                 className="p-3 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-2xl transition-colors cursor-pointer"
                 title="Re-record"
               >

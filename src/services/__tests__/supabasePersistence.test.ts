@@ -3,7 +3,9 @@ import {
   SHARD_COUNT,
   getShardIdForElement,
   partitionElementsIntoChunks,
+  partitionMutationPayloads,
   sanitizeForDatabase,
+  sanitizeElementForStorage,
   simplifyPoints,
   stableHash,
 } from '../boardPersistence';
@@ -54,4 +56,44 @@ describe('Supabase persistence primitives', () => {
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.flat()).toHaveLength(elements.length);
   });
+  it('partitions mutation RPCs below both count and byte limits', () => {
+    const payloads = Array.from({ length: 11 }, (_, index) => ({
+      elementId: `element-${index}`,
+      shardId: `shard_${index % 4}`,
+      action: 'set' as const,
+      data: {
+        id: `element-${index}`,
+        type: 'text' as const,
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40,
+        text: 'x'.repeat(250),
+        color: '#000000',
+        fontSize: 16,
+        zIndex: index,
+      },
+      updatedAt: index,
+      updatedByClientId: 'test-client',
+    }));
+
+    const batches = partitionMutationPayloads(payloads, 1_500, 4);
+    expect(batches.flat()).toHaveLength(payloads.length);
+    expect(batches.every((batch) => batch.length <= 4)).toBe(true);
+    expect(batches.length).toBeGreaterThan(2);
+  });
+
+  it('rejects prototype keys and non-finite numbers before persistence', () => {
+    const poisoned = JSON.parse('{"safe":1,"__proto__":{"polluted":true}}');
+    expect(() => sanitizeForDatabase(poisoned)).toThrow(/forbidden key/i);
+    expect(() => sanitizeForDatabase({ x: Number.NaN })).toThrow(/non-finite/i);
+  });
+
+  it('validates element identity and type before persistence', () => {
+    expect(() => sanitizeElementForStorage({ id: '', type: 'text' } as unknown as BoardElement))
+      .toThrow(/element id/i);
+    expect(() => sanitizeElementForStorage({ id: 'bad', type: 'unknown' } as unknown as BoardElement))
+      .toThrow(/element type/i);
+  });
+
 });

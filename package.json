@@ -8,10 +8,12 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
+    "schema:generate": "node scripts/generate-schema.mjs",
+    "check:migrations": "node scripts/verify-migrations.mjs",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm test && npm run build"
+    "verify": "npm run check:migrations && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.15.0",
@@ -49,5 +51,9 @@
     "vite": "^6.2.3",
     "vitest": "^4.1.10"
   },
-  "description": "Optimized collaborative whiteboard using Supabase Postgres, Auth, Storage, and a WebSocket relay."
+  "description": "Optimized collaborative whiteboard using Supabase Postgres, Auth, Storage, and a WebSocket relay.",
+  "engines": {
+    "node": "22.x",
+    "npm": ">=10 <12"
+  }
 }

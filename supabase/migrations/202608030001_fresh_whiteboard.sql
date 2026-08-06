@@ -1,5 +1,6 @@
--- Fresh Supabase backend for the collaborative whiteboard.
--- Run this entire file once in the Supabase SQL Editor for a NEW project.
+-- Fresh Supabase backend matching the production legacy-compatible schema.
+-- Board and owner IDs are text because the live project was created with text identifiers.
+-- New projects should apply every file in supabase/migrations in filename order.
 
 create extension if not exists pgcrypto;
 
@@ -13,16 +14,16 @@ create table if not exists public.profiles (
 );
 
 create table if not exists public.boards (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key default gen_random_uuid()::text,
   name text not null default 'Untitled Board',
   description text not null default '',
   created_at bigint not null default (extract(epoch from clock_timestamp()) * 1000)::bigint,
   updated_at bigint not null default (extract(epoch from clock_timestamp()) * 1000)::bigint,
   created_by text not null default 'Unknown',
-  owner_uid uuid not null references auth.users(id) on delete cascade,
+  owner_uid text not null,
   access_mode text not null default 'private' check (access_mode in ('private', 'shared', 'link-view', 'link-edit', 'public')),
-  editor_uids uuid[] not null default '{}',
-  viewer_uids uuid[] not null default '{}',
+  editor_uids text[] not null default '{}',
+  viewer_uids text[] not null default '{}',
   status text not null default 'ready' check (status in ('initializing', 'ready')),
   student_id text not null default '',
   student_name text not null default '',
@@ -38,7 +39,7 @@ create table if not exists public.boards (
 );
 
 create table if not exists public.board_shards (
-  board_id uuid not null references public.boards(id) on delete cascade,
+  board_id text not null references public.boards(id) on delete cascade,
   shard_id text not null,
   revision bigint not null default 0,
   elements jsonb not null default '{}'::jsonb,
@@ -48,7 +49,7 @@ create table if not exists public.board_shards (
 );
 
 create table if not exists public.board_assets (
-  board_id uuid not null references public.boards(id) on delete cascade,
+  board_id text not null references public.boards(id) on delete cascade,
   asset_id text not null,
   mime_type text not null,
   object_path text not null unique,
@@ -64,14 +65,14 @@ create table if not exists public.board_assets (
 );
 
 create table if not exists public.presence (
-  id uuid primary key references auth.users(id) on delete cascade,
+  id text primary key,
   profile_id text,
   name text not null default 'Guest User',
   email text,
   last_active bigint not null default (extract(epoch from clock_timestamp()) * 1000)::bigint,
   is_online boolean not null default true,
   role text not null default 'student',
-  current_board_id uuid references public.boards(id) on delete set null,
+  current_board_id text references public.boards(id) on delete set null,
   current_board_name text,
   data jsonb not null default '{}'::jsonb
 );
@@ -138,7 +139,7 @@ as $$
   select coalesce((select p.is_admin from public.profiles p where p.id = (select auth.uid())), false)
 $$;
 
-create or replace function public.can_manage_board(p_board_id uuid)
+create or replace function public.can_manage_board(p_board_id text)
 returns boolean
 language sql
 stable
@@ -149,11 +150,11 @@ as $$
     select 1
     from public.boards b
     where b.id = p_board_id
-      and (b.owner_uid = (select auth.uid()) or public.is_admin())
+      and (b.owner_uid = (select auth.uid())::text or public.is_admin())
   )
 $$;
 
-create or replace function public.can_read_board(p_board_id uuid)
+create or replace function public.can_read_board(p_board_id text)
 returns boolean
 language sql
 stable
@@ -166,15 +167,15 @@ as $$
     where b.id = p_board_id
       and (
         public.is_admin()
-        or b.owner_uid = (select auth.uid())
-        or (select auth.uid()) = any(b.editor_uids)
-        or (select auth.uid()) = any(b.viewer_uids)
+        or b.owner_uid = (select auth.uid())::text
+        or (select auth.uid())::text = any(b.editor_uids)
+        or (select auth.uid())::text = any(b.viewer_uids)
         or b.access_mode in ('link-view', 'link-edit', 'public')
       )
   )
 $$;
 
-create or replace function public.can_write_board(p_board_id uuid)
+create or replace function public.can_write_board(p_board_id text)
 returns boolean
 language sql
 stable
@@ -187,8 +188,8 @@ as $$
     where b.id = p_board_id
       and (
         public.is_admin()
-        or b.owner_uid = (select auth.uid())
-        or (select auth.uid()) = any(b.editor_uids)
+        or b.owner_uid = (select auth.uid())::text
+        or (select auth.uid())::text = any(b.editor_uids)
         or (b.access_mode in ('link-edit', 'public') and b.students_can_write)
       )
   )
@@ -209,16 +210,16 @@ as $$
   where b.status = 'ready'
     and (
       public.is_admin()
-      or b.owner_uid = (select auth.uid())
-      or (select auth.uid()) = any(b.editor_uids)
-      or (select auth.uid()) = any(b.viewer_uids)
+      or b.owner_uid = (select auth.uid())::text
+      or (select auth.uid())::text = any(b.editor_uids)
+      or (select auth.uid())::text = any(b.viewer_uids)
     )
   order by b.created_at desc
   limit least(greatest(p_limit, 1), 200)
   offset greatest(p_offset, 0)
 $$;
 
-create or replace function public.get_board_state(p_board_id uuid)
+create or replace function public.get_board_state(p_board_id text)
 returns jsonb
 language plpgsql
 stable
@@ -250,7 +251,7 @@ begin
 end;
 $$;
 
-create or replace function public.patch_board(p_board_id uuid, p_patch jsonb)
+create or replace function public.patch_board(p_board_id text, p_patch jsonb)
 returns public.boards
 language plpgsql
 security definer
@@ -281,13 +282,13 @@ begin
     created_at = case when p_patch ? 'createdAt' then (p_patch ->> 'createdAt')::bigint else b.created_at end,
     updated_at = case when p_patch ? 'updatedAt' then (p_patch ->> 'updatedAt')::bigint else greatest(b.updated_at, v_now) end,
     created_by = case when p_patch ? 'createdBy' then coalesce(p_patch ->> 'createdBy', b.created_by) else b.created_by end,
-    owner_uid = case when p_patch ? 'ownerUid' then (p_patch ->> 'ownerUid')::uuid else b.owner_uid end,
+    owner_uid = case when p_patch ? 'ownerUid' then p_patch ->> 'ownerUid' else b.owner_uid end,
     access_mode = case when p_patch ? 'accessMode' then p_patch ->> 'accessMode' else b.access_mode end,
     editor_uids = case when p_patch ? 'editorUids' then
-      coalesce((select array_agg(value::uuid) from jsonb_array_elements_text(p_patch -> 'editorUids')), '{}'::uuid[])
+      coalesce((select array_agg(value) from jsonb_array_elements_text(p_patch -> 'editorUids')), '{}'::text[])
       else b.editor_uids end,
     viewer_uids = case when p_patch ? 'viewerUids' then
-      coalesce((select array_agg(value::uuid) from jsonb_array_elements_text(p_patch -> 'viewerUids')), '{}'::uuid[])
+      coalesce((select array_agg(value) from jsonb_array_elements_text(p_patch -> 'viewerUids')), '{}'::text[])
       else b.viewer_uids end,
     status = case when p_patch ? 'status' then p_patch ->> 'status' else b.status end,
     student_id = case when p_patch ? 'studentId' then coalesce(p_patch ->> 'studentId', '') else b.student_id end,
@@ -315,7 +316,7 @@ begin
 end;
 $$;
 
-create or replace function public.apply_board_mutations(p_board_id uuid, p_mutations jsonb)
+create or replace function public.apply_board_mutations(p_board_id text, p_mutations jsonb)
 returns jsonb
 language plpgsql
 security definer
@@ -396,7 +397,7 @@ begin
       v_tombstones := '{}'::jsonb;
     end if;
 
-    v_before := jsonb_object_length(v_elements);
+    select count(*) into v_before from jsonb_object_keys(v_elements);
 
     for v_mut in
       select value
@@ -469,11 +470,11 @@ begin
       from jsonb_each(v_tombstones)
       where coalesce(nullif(value ->> 'updatedAt', '')::bigint, 0) >= v_cutoff;
 
-      v_after := jsonb_object_length(v_elements);
+      select count(*) into v_after from jsonb_object_keys(v_elements);
       v_total_delta := v_total_delta + (v_after - v_before);
       v_changed := array_append(v_changed, v_shard_id);
 
-      if v_after = 0 and jsonb_object_length(v_tombstones) = 0 then
+      if v_after = 0 and not exists (select 1 from jsonb_object_keys(v_tombstones)) then
         delete from public.board_shards
         where board_id = p_board_id and shard_id = v_shard_id;
         v_deleted := array_append(v_deleted, v_shard_id);
@@ -556,7 +557,7 @@ for select to authenticated
 using (public.can_read_board(id));
 create policy boards_insert on public.boards
 for insert to authenticated
-with check (owner_uid = (select auth.uid()));
+with check (owner_uid = (select auth.uid())::text);
 create policy boards_update on public.boards
 for update to authenticated
 using (public.can_manage_board(id))
@@ -599,17 +600,17 @@ drop policy if exists presence_update_self on public.presence;
 drop policy if exists presence_delete on public.presence;
 create policy presence_select on public.presence
 for select to authenticated
-using (id = (select auth.uid()) or public.is_admin());
+using (id = (select auth.uid())::text or public.is_admin());
 create policy presence_write_self on public.presence
 for insert to authenticated
-with check (id = (select auth.uid()));
+with check (id = (select auth.uid())::text);
 create policy presence_update_self on public.presence
 for update to authenticated
-using (id = (select auth.uid()))
-with check (id = (select auth.uid()));
+using (id = (select auth.uid())::text)
+with check (id = (select auth.uid())::text);
 create policy presence_delete on public.presence
 for delete to authenticated
-using (id = (select auth.uid()) or public.is_admin());
+using (id = (select auth.uid())::text or public.is_admin());
 
 drop policy if exists admin_settings_select on public.admin_settings;
 drop policy if exists admin_settings_write on public.admin_settings;
@@ -629,22 +630,22 @@ grant select, insert, update, delete on public.board_assets to authenticated;
 grant select, insert, update, delete on public.presence to authenticated;
 grant select, insert, update, delete on public.admin_settings to authenticated;
 revoke execute on function public.is_admin() from public, anon;
-revoke execute on function public.can_manage_board(uuid) from public, anon;
-revoke execute on function public.can_read_board(uuid) from public, anon;
-revoke execute on function public.can_write_board(uuid) from public, anon;
+revoke execute on function public.can_manage_board(text) from public, anon;
+revoke execute on function public.can_read_board(text) from public, anon;
+revoke execute on function public.can_write_board(text) from public, anon;
 revoke execute on function public.list_my_boards(integer, integer) from public, anon;
-revoke execute on function public.get_board_state(uuid) from public, anon;
-revoke execute on function public.patch_board(uuid, jsonb) from public, anon;
-revoke execute on function public.apply_board_mutations(uuid, jsonb) from public, anon;
+revoke execute on function public.get_board_state(text) from public, anon;
+revoke execute on function public.patch_board(text, jsonb) from public, anon;
+revoke execute on function public.apply_board_mutations(text, jsonb) from public, anon;
 
 grant execute on function public.is_admin() to authenticated;
-grant execute on function public.can_manage_board(uuid) to authenticated;
-grant execute on function public.can_read_board(uuid) to authenticated;
-grant execute on function public.can_write_board(uuid) to authenticated;
+grant execute on function public.can_manage_board(text) to authenticated;
+grant execute on function public.can_read_board(text) to authenticated;
+grant execute on function public.can_write_board(text) to authenticated;
 grant execute on function public.list_my_boards(integer, integer) to authenticated;
-grant execute on function public.get_board_state(uuid) to authenticated;
-grant execute on function public.patch_board(uuid, jsonb) to authenticated;
-grant execute on function public.apply_board_mutations(uuid, jsonb) to authenticated;
+grant execute on function public.get_board_state(text) to authenticated;
+grant execute on function public.patch_board(text, jsonb) to authenticated;
+grant execute on function public.apply_board_mutations(text, jsonb) to authenticated;
 
 -- Private Storage bucket for images, audio, signatures, and PDF pages.
 insert into storage.buckets (id, name, public, file_size_limit)
@@ -654,7 +655,7 @@ set public = false,
     file_size_limit = excluded.file_size_limit;
 
 create or replace function public.storage_board_id(p_name text)
-returns uuid
+returns text
 language plpgsql
 immutable
 as $$
@@ -665,7 +666,7 @@ begin
   if array_length(v_parts, 1) < 2 or v_parts[1] <> 'boards' then
     return null;
   end if;
-  return v_parts[2]::uuid;
+  return v_parts[2];
 exception when others then
   return null;
 end;
@@ -707,6 +708,8 @@ using (
 -- Live cursors, drawing previews, and shard-change notifications use the app's
 -- existing WebSocket relay, so database replication is intentionally not enabled.
 
--- Give the first administrator access by replacing the email below after Google sign-in:
--- update public.profiles set is_admin = true
--- where id = (select id from auth.users where email = 'YOUR_EMAIL@example.com');
+-- After every migration has been applied, give the first administrator access
+-- through the protected private table (never through public.profiles.is_admin):
+-- insert into private.admin_users (user_id)
+-- select id from auth.users where lower(email) = lower('YOUR_EMAIL@example.com')
+-- on conflict (user_id) do nothing;

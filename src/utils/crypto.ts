@@ -1,7 +1,9 @@
 /**
- * Secure local storage utility for API keys
- * Uses a user-specific or device-specific salt key to encrypt and obfuscate stored keys.
- * This prevents simple inspection, scraper extensions, or XSS scripts from extracting the key in cleartext.
+ * Legacy reversible obfuscation retained only for backwards compatibility with
+ * old local data. This is not cryptographic protection: any script running in
+ * the same browser origin can read both the value and its device salt. Do not
+ * use these helpers to store API keys, access tokens, passwords, or other
+ * secrets. Current runtime code keeps the Gemini key in sessionStorage instead.
  */
 
 // Generate or retrieve a device-specific local salt to ensure key uniqueness per device
@@ -24,7 +26,7 @@ function getDeviceSalt(): string {
 }
 
 /**
- * Encrypts a plain-text API key using a dynamic key (derived from current user ID + device salt)
+ * Reversibly obfuscates legacy text. Do not use for secrets.
  */
 export function secureEncrypt(plainText: string, userId?: string): string {
   if (!plainText) return "";
@@ -50,7 +52,7 @@ export function secureEncrypt(plainText: string, userId?: string): string {
 }
 
 /**
- * Decrypts a previously secured API key
+ * Reverses the legacy obfuscation format.
  */
 export function secureDecrypt(encryptedText: string, userId?: string): string {
   if (!encryptedText) return "";
@@ -76,7 +78,7 @@ export function secureDecrypt(encryptedText: string, userId?: string): string {
     
     return String.fromCharCode(...decryptedBytes);
   } catch (err) {
-    console.error("Failed to decrypt API Key securely:", err);
+    console.error("Failed to decode legacy obfuscated text:", err);
     return "";
   }
 }

@@ -6,6 +6,7 @@ import { UserProfile } from './types';
 import Dashboard from './components/Dashboard';
 import WhiteboardCanvas from './components/WhiteboardCanvas';
 import { Sparkles, ArrowRight, ShieldCheck } from 'lucide-react';
+import TurnstileWidget from './components/TurnstileWidget';
 import { isSandboxEnvironment, getSandboxLocalBoards } from './utils/sandboxGuard';
 import { trackOperation } from './utils/databaseInstrumentation';
 
@@ -14,6 +15,8 @@ const COLLABORATOR_COLORS = [
   '#06b6d4', '#3b82f6', '#6366f1', '#8b5cf6', 
   '#ec4899', '#f43f5e'
 ];
+
+const PENDING_SHARE_TOKEN_KEY = 'lucid_spark_pending_share_token';
 
 export default function App() {
   const [boardId, setBoardId] = useState<string | null>(null);
@@ -28,22 +31,26 @@ export default function App() {
   // Quick link join variables
   const [linkBoardId, setLinkBoardId] = useState<string | null>(null);
   const [shareToken, setShareToken] = useState<string | null>(null);
-  const shareRedemptionPromiseRef = useRef<Promise<{ boardId: string; name: string }> | null>(null);
+  const shareRedemptionPromiseRef = useRef<{ token: string; promise: Promise<{ boardId: string; name: string }> } | null>(null);
   const [nicknameInput, setNicknameInput] = useState('');
   const [colorInput, setColorInput] = useState(COLLABORATOR_COLORS[Math.floor(Math.random() * COLLABORATOR_COLORS.length)]);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaResetKey, setCaptchaResetKey] = useState(0);
+  const [isJoiningGuest, setIsJoiningGuest] = useState(false);
+  const turnstileSiteKey = String(import.meta.env.VITE_TURNSTILE_SITE_KEY || '').trim();
 
 
   const redeemShareAndJoin = async (
     token: string,
     activeProfile: UserProfile
   ): Promise<{ boardId: string; name: string }> => {
-    if (!shareRedemptionPromiseRef.current) {
-      shareRedemptionPromiseRef.current = (async () => {
-        const normalizedToken = token.trim();
-        if (normalizedToken.length < 32 || normalizedToken.length > 256) {
-          throw new Error('This sharing link is invalid or incomplete.');
-        }
+    const normalizedToken = token.trim();
+    if (normalizedToken.length < 32 || normalizedToken.length > 256) {
+      throw new Error('This sharing link is invalid or incomplete.');
+    }
 
+    if (!shareRedemptionPromiseRef.current || shareRedemptionPromiseRef.current.token !== normalizedToken) {
+      const promise = (async () => {
         const { data, error } = await supabase.rpc('redeem_board_share_link', {
           p_raw_token: normalizedToken,
         });
@@ -56,15 +63,18 @@ export default function App() {
 
         return { boardId: redeemedBoardId, name: redeemedBoardName };
       })();
+      shareRedemptionPromiseRef.current = { token: normalizedToken, promise };
     }
 
+    const activeRedemption = shareRedemptionPromiseRef.current;
     try {
-      const result = await shareRedemptionPromiseRef.current;
+      const result = await activeRedemption.promise;
       setProfile(activeProfile);
       setBoardId(result.boardId);
       setBoardName(result.name);
       setShareToken(null);
       setLinkBoardId(null);
+      sessionStorage.removeItem(PENDING_SHARE_TOKEN_KEY);
 
       // The secret is needed only once. The persisted Supabase session and
       // board_members row are enough for later reloads in the same browser.
@@ -72,7 +82,9 @@ export default function App() {
       window.history.replaceState({ path: cleanUrl }, '', cleanUrl);
       return result;
     } finally {
-      shareRedemptionPromiseRef.current = null;
+      if (shareRedemptionPromiseRef.current === activeRedemption) {
+        shareRedemptionPromiseRef.current = null;
+      }
     }
   };
 
@@ -83,7 +95,10 @@ export default function App() {
     const urlBoardId = params.get('board');
     // Prefer a URL fragment so the one-time share secret is not sent in HTTP
     // requests or access logs. Query-string links remain supported for older links.
-    const rawShareToken = hashParams.get('share') || params.get('share');
+    const urlShareToken = hashParams.get('share') || params.get('share');
+    const storedShareToken = sessionStorage.getItem(PENDING_SHARE_TOKEN_KEY);
+    const rawShareToken = urlShareToken || storedShareToken;
+    if (urlShareToken) sessionStorage.setItem(PENDING_SHARE_TOKEN_KEY, urlShareToken);
 
     // Subscribe to Supabase authentication changes
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -92,15 +107,16 @@ export default function App() {
       setAuthUserId(user?.uid || null);
 
       if (user) {
-        // Preserve the chosen guest name for anonymous users. Treating every
-        // Treat anonymous Supabase sessions as guests, not signed-in Google users.
-        // from name-based recovery queries after a reload.
+        // Preserve a chosen guest nickname across reloads, but never treat an
+        // anonymous Supabase session as a teacher or permanent Google account.
         const savedName = localStorage.getItem('lucid_spark_user_name');
         const resolvedName = user.isAnonymous
           ? (savedName || 'Guest User')
           : (user.displayName || user.email?.split('@')[0] || savedName || 'Google User');
         const savedColor = localStorage.getItem('lucid_spark_user_color') || colorInput;
-        const savedRole = (localStorage.getItem('lucid_spark_user_role') || 'student') as 'student' | 'teacher';
+        const savedRole = user.isAnonymous
+          ? 'student'
+          : (localStorage.getItem('lucid_spark_user_role') || 'student') as 'student' | 'teacher';
 
         localStorage.setItem('lucid_spark_user_id', user.uid);
         if (!savedName || !user.isAnonymous) {
@@ -148,6 +164,13 @@ export default function App() {
           // A secure share token is redeemed only after an authenticated Google
           // or anonymous Supabase session exists. Ask for the guest nickname first.
           setShareToken(rawShareToken);
+          if (savedName) setNicknameInput(savedName);
+        } else if (urlBoardId) {
+          // A plain board ID is not an invitation. Without an existing Supabase
+          // session, require Google sign-in instead of creating a new anonymous
+          // account that cannot possibly have membership for this board.
+          setLinkBoardId(urlBoardId);
+          if (savedName) setNicknameInput(savedName);
         } else if (savedName) {
           const savedId = localStorage.getItem('lucid_spark_user_id') || 'u-' + Math.floor(Math.random() * 1000000);
           const savedColor = localStorage.getItem('lucid_spark_user_color') || colorInput;
@@ -164,14 +187,6 @@ export default function App() {
             role: savedRole
           };
           setProfile(activeProfile);
-
-          if (urlBoardId) {
-            joinBoardDirectly(urlBoardId, activeProfile);
-          }
-        } else if (urlBoardId) {
-          // A board-id URL works only for a user who already redeemed a secure
-          // link or was explicitly added as a member.
-          setLinkBoardId(urlBoardId);
         }
       }
 
@@ -183,30 +198,52 @@ export default function App() {
   }, []);
 
   // Read the global app status only when a real Supabase session exists.
-  // Loading the landing page must never create an anonymous Auth user.
+  // Postgres Changes provides immediate updates when Realtime is enabled for
+  // the table; a low-frequency poll is retained as a reliable free-tier fallback.
   useEffect(() => {
     if (isSandboxEnvironment() || !authInitialized || !authUserId) {
       setAppEnabled(true);
       return;
     }
 
-    const settingsRef = doc(db, 'admin_settings', 'global');
-    const unsubscribe = onSnapshot(settingsRef, (docSnap) => {
-      if (!docSnap.exists()) {
-        setAppEnabled(true);
+    let active = true;
+    const loadSetting = async () => {
+      const { data, error } = await supabase
+        .from('admin_settings')
+        .select('app_enabled,data')
+        .eq('id', 'global')
+        .maybeSingle();
+      if (!active) return;
+      if (error) {
+        console.error('Error loading global Supabase settings:', error);
         return;
       }
-      const data = docSnap.data();
-      setAppEnabled(data.appEnabled !== false);
-    }, (error) => {
-      console.error('Error loading global Supabase settings:', error);
-      setAppEnabled(true);
-    });
+      const nested = data?.data && typeof data.data === 'object' ? data.data as Record<string, unknown> : {};
+      setAppEnabled(data?.app_enabled !== false && nested.appEnabled !== false);
+    };
 
-    return () => unsubscribe();
+    void loadSetting();
+    const channel = supabase
+      .channel(`app-settings-${authUserId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'admin_settings', filter: 'id=eq.global' },
+        () => void loadSetting()
+      )
+      .subscribe();
+    const poll = window.setInterval(() => void loadSetting(), 60_000);
+    const handleFocus = () => void loadSetting();
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      active = false;
+      window.clearInterval(poll);
+      window.removeEventListener('focus', handleFocus);
+      void supabase.removeChannel(channel);
+    };
   }, [authInitialized, authUserId]);
 
-  // Track meaningful presence transitions without periodic database heartbeats
+  // Track presence with low-frequency heartbeats only while the page is visible
   const lastPresenceUpdateRef = React.useRef<number>(0);
   const lastPresenceStateRef = React.useRef<{ isOnline: boolean; boardId: string | null } | null>(null);
   const boardIdRef = React.useRef<string | null>(boardId);
@@ -261,12 +298,30 @@ export default function App() {
       }
     };
 
-    // Initial checkin
-    updatePresence(true);
+    // Initial check-in plus a low-frequency heartbeat while the page is visible.
+    // This keeps the admin panel accurate without writing on cursor movement or
+    // every interaction. Stale rows are still treated as offline client-side.
+    void updatePresence(true, true);
+    const heartbeat = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        void updatePresence(true, true);
+      }
+    }, 90_000);
+    const handleVisibility = () => {
+      void updatePresence(document.visibilityState === 'visible', true);
+    };
+    const handleOnline = () => void updatePresence(true, true);
+    const handleOffline = () => void updatePresence(false, true);
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
-    // Cleanup presence on unmount
     return () => {
-      updatePresence(false, true);
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      void updatePresence(false, true);
     };
   }, [profile, authInitialized]);
 
@@ -296,6 +351,7 @@ export default function App() {
 
   const handleSignInGoogle = async () => {
     try {
+      if (shareToken) sessionStorage.setItem(PENDING_SHARE_TOKEN_KEY, shareToken);
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
       console.error('Google Sign-In Error:', err);
@@ -311,6 +367,7 @@ export default function App() {
       setProfile(null);
     } catch (err) {
       console.error('Sign-Out Error:', err);
+      alert('Could not sign out: ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -348,10 +405,14 @@ export default function App() {
 
   const handleLinkJoinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nicknameInput.trim() || (!shareToken && !linkBoardId)) return;
+    if (!shareToken) {
+      alert('This board-ID link is not an invitation. Sign in with a Google account that already has access, or ask the owner for a new secure link.');
+      return;
+    }
+    if (!nicknameInput.trim()) return;
 
     const savedId = localStorage.getItem('lucid_spark_user_id') || 'u-' + Math.floor(Math.random() * 1000000);
-    const savedRole = (localStorage.getItem('lucid_spark_user_role') || 'student') as 'student' | 'teacher';
+    const savedRole: 'student' = 'student';
     localStorage.setItem('lucid_spark_user_name', nicknameInput.trim());
     localStorage.setItem('lucid_spark_user_color', colorInput);
     localStorage.setItem('lucid_spark_user_role', savedRole); // preserve role or default to student
@@ -363,10 +424,16 @@ export default function App() {
       role: savedRole
     };
 
+    if (turnstileSiteKey && !authUserId && !captchaToken) {
+      alert('Complete the anti-bot verification before joining as a guest.');
+      return;
+    }
+
+    setIsJoiningGuest(true);
     try {
       if (!isSandboxEnvironment()) {
         const { ensureAuthUser } = await import('./services/boardPersistence');
-        const authenticated = await ensureAuthUser();
+        const authenticated = await ensureAuthUser(captchaToken || undefined);
         if (!authenticated) {
           alert('Authentication is still being prepared. Finish Google sign-in or try guest access again.');
           return;
@@ -375,15 +442,16 @@ export default function App() {
         localStorage.setItem('lucid_spark_user_id', authenticated.uid);
       }
       setProfile(userProfile);
-      if (shareToken) {
-        await redeemShareAndJoin(shareToken, userProfile);
-      } else if (linkBoardId) {
-        await joinBoardDirectly(linkBoardId, userProfile);
-        setLinkBoardId(null);
-      }
+      await redeemShareAndJoin(shareToken, userProfile);
     } catch (error) {
       console.error('Unable to join shared board:', error);
+      if (turnstileSiteKey) {
+        setCaptchaToken(null);
+        setCaptchaResetKey((value) => value + 1);
+      }
       alert(`Unable to join this board: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsJoiningGuest(false);
     }
   };
 
@@ -497,12 +565,22 @@ export default function App() {
           </div>
 
           <div>
-            <h1 className="text-xl font-bold text-slate-900">You're Invited to Collaborate!</h1>
-            <p className="text-xs text-slate-500 mt-1">Set your nickname and color to join this shared whiteboard room.</p>
+            <h1 className="text-xl font-bold text-slate-900">
+              {shareToken ? "You're Invited to Collaborate!" : 'Sign In Required'}
+            </h1>
+            <p className="text-xs text-slate-500 mt-1">
+              {shareToken
+                ? 'Set your nickname and color to redeem this secure whiteboard invitation.'
+                : 'This board-ID link works only for an account that already has permission.'}
+            </p>
           </div>
 
           <div className="bg-slate-50 border border-slate-100 p-4 rounded-2xl flex flex-col items-center justify-center space-y-3">
-            <p className="text-[11px] text-slate-500 text-center">Want to bypass this setup and log in securely with your Google profile?</p>
+            <p className="text-[11px] text-slate-500 text-center">
+              {shareToken
+                ? 'Use your Google profile instead of creating a temporary guest session.'
+                : 'Sign in with the Google account that was explicitly granted access.'}
+            </p>
             <button
               onClick={handleSignInGoogle}
               className="flex items-center space-x-2 bg-white hover:bg-slate-50 active:bg-slate-100 border border-slate-200 shadow-sm text-slate-700 hover:text-slate-900 px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-colors"
@@ -517,58 +595,82 @@ export default function App() {
             </button>
           </div>
 
-          <div className="relative flex py-2 items-center">
-            <div className="flex-grow border-t border-slate-100"></div>
-            <span className="flex-shrink mx-4 text-slate-400 text-[10px] font-bold uppercase tracking-wider">or join as guest</span>
-            <div className="flex-grow border-t border-slate-100"></div>
-          </div>
-
-          <form onSubmit={handleLinkJoinSubmit} className="space-y-5 text-left">
-            <div>
-              <label className="block text-xs font-bold text-slate-400 mb-1.5 uppercase tracking-wider">
-                Your Guest Nickname
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Clara Oswald"
-                value={nicknameInput}
-                onChange={(e) => setNicknameInput(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 transition-colors"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-400 mb-1.5 uppercase tracking-wider">
-                Select Your Cursor Color
-              </label>
-              <div className="flex flex-wrap gap-2.5 mt-2">
-                {COLLABORATOR_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setColorInput(c)}
-                    className={`w-8 h-8 rounded-full border transition-all transform hover:scale-110 flex items-center justify-center ${
-                      colorInput === c ? 'ring-2 ring-blue-600 border-white scale-105' : 'border-transparent'
-                    }`}
-                    style={{ backgroundColor: c }}
-                  >
-                    {colorInput === c && (
-                      <div className="w-1.5 h-1.5 rounded-full bg-white shadow-xs" />
-                    )}
-                  </button>
-                ))}
+          {shareToken ? (
+            <>
+              <div className="relative flex items-center py-2">
+                <div className="flex-grow border-t border-slate-100"></div>
+                <span className="mx-4 flex-shrink text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  or join as guest
+                </span>
+                <div className="flex-grow border-t border-slate-100"></div>
               </div>
-            </div>
 
-            <button
-              type="submit"
-              className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold py-3.5 rounded-xl shadow-md shadow-blue-600/10 hover:shadow-lg transition-all text-xs flex items-center justify-center space-x-2 cursor-pointer"
-            >
-              <span>Join Whiteboard Workspace</span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          </form>
+              <form onSubmit={handleLinkJoinSubmit} className="space-y-5 text-left">
+                <div>
+                  <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Your Guest Nickname
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Clara Oswald"
+                    value={nicknameInput}
+                    onChange={(e) => setNicknameInput(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm transition-colors focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/20"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-400">
+                    Select Your Cursor Color
+                  </label>
+                  <div className="mt-2 flex flex-wrap gap-2.5">
+                    {COLLABORATOR_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        onClick={() => setColorInput(c)}
+                        className={`flex h-8 w-8 transform cursor-pointer items-center justify-center rounded-full border transition-all hover:scale-110 ${
+                          colorInput === c
+                            ? 'scale-105 border-white ring-2 ring-blue-600'
+                            : 'border-transparent'
+                        }`}
+                        style={{ backgroundColor: c }}
+                      >
+                        {colorInput === c && (
+                          <div className="h-1.5 w-1.5 rounded-full bg-white shadow-xs" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {turnstileSiteKey && !authUserId && (
+                  <TurnstileWidget
+                    siteKey={turnstileSiteKey}
+                    onToken={setCaptchaToken}
+                    resetKey={captchaResetKey}
+                  />
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isJoiningGuest || Boolean(turnstileSiteKey && !authUserId && !captchaToken)}
+                  className="flex w-full cursor-pointer items-center justify-center space-x-2 rounded-xl bg-blue-600 py-3.5 text-xs font-bold text-white shadow-md shadow-blue-600/10 transition-all hover:bg-blue-700 hover:shadow-lg active:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  <span>{isJoiningGuest ? 'Joining securely…' : 'Join Whiteboard Workspace'}</span>
+                  {!isJoiningGuest && <ArrowRight className="h-4 w-4" />}
+                </button>
+              </form>
+            </>
+          ) : (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-left">
+              <p className="text-xs font-semibold text-amber-900">No invitation token is present.</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-amber-800">
+                Ask the board owner to create a new secure Share link. Do not use an old URL that contains only <code>?board=</code> in a new browser.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );

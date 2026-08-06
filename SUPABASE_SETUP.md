@@ -1,96 +1,75 @@
-# Fresh Supabase Setup
+# Fresh Supabase setup
 
-## 1. Create the project
+These instructions are for a **brand-new** project. The existing production
+project has already been migrated and should not rerun the root schema.
 
-Create a new Supabase project. No Firebase export or migration is required.
+## 1. Create the project and schema
 
-## 2. Install the database schema
+Create a Supabase project. In SQL Editor, run the full generated
+`supabase-schema.sql` once. The generated file is wrapped in one transaction, so
+a failure rolls back the fresh setup. It creates profiles, text-ID boards, shards, private
+assets, memberships, share links, presence, settings, RLS policies, Storage
+policies, triggers, and secured RPCs.
 
-Open **SQL Editor**, create a query, paste the full contents of `supabase-schema.sql`, and run it once.
+## 2. Configure authentication
 
-The script creates:
+Under Authentication:
 
-- `profiles`
-- `boards`
-- `board_shards`
-- `board_assets`
-- `presence`
-- `admin_settings`
-- indexes, RLS policies, Storage policies, and optimized RPC functions
-- private Storage bucket `board-assets`
+- Enable **Google** for owners/permanent users.
+- Enable **Anonymous Sign-Ins** for students redeeming secure links.
+- Set the production Site URL and allowed redirect URL.
+- Keep `http://localhost:3000/**` only for local development.
 
-The file is safe to rerun while developing because tables, policies, triggers, and functions are created or replaced defensively.
+Optional: configure Cloudflare Turnstile and set the public key as
+`VITE_TURNSTILE_SITE_KEY`.
 
-## 3. Configure authentication
+## 3. Add the first administrator
 
-In **Authentication → Providers**:
+Sign in with Google once, then run:
 
-- Enable **Anonymous Sign-Ins** for guest students using shared links.
-- Enable **Google** for teachers and permanent accounts.
-
-For Google OAuth, configure the Google client credentials requested by Supabase. Add the deployed app URL and local URL to the allowed redirect URLs, including:
-
-```text
-http://localhost:3000
+```sql
+insert into private.admin_users (user_id)
+select id
+from auth.users
+where lower(email) = lower('YOUR_EMAIL@example.com')
+on conflict (user_id) do nothing;
 ```
 
-## 4. Configure the app
+Verify:
 
-Copy `.env.example` to `.env.local`:
+```sql
+select a.user_id, u.email, a.created_at
+from private.admin_users a
+join auth.users u on u.id = a.user_id;
+```
+
+Do not set `profiles.is_admin`; authorization uses the protected private table.
+
+## 4. Configure environment
 
 ```env
 VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLISHABLE_KEY
 VITE_LOCAL_SANDBOX=false
+APP_ORIGIN=http://localhost:3000
 PORT=3000
 ```
 
-Find the URL and publishable key under **Project Settings → API**.
-
 Never expose the service-role key.
 
-## 5. Create the first administrator
-
-First sign in to the app with Google so Supabase creates your profile. Then run this in SQL Editor, replacing the email:
-
-```sql
-update public.profiles
-set is_admin = true,
-    updated_at = now()
-where id = (
-  select id
-  from auth.users
-  where email = 'YOUR_EMAIL@example.com'
-);
-```
-
-Sign out and back in after changing administrator access.
-
-## 6. Run locally
+## 5. Run locally
 
 ```bash
-npm install
+npm ci --include=dev
+npm run verify
 npm run dev
 ```
 
-The Node server is required because it hosts `/ws`, the zero-database relay used for cursors and live drawing.
+The Node server is required for `/ws`; a static-only host cannot provide live
+collaboration.
 
-## 7. Production deployment
+## Sharing model
 
-Build the frontend and run the Node server:
-
-```bash
-npm run build
-NODE_ENV=production npm start
-```
-
-Deploy to a host that supports long-running Node processes and WebSocket upgrades. A static-only host will load saved boards but will not provide live cursors or instant peer updates.
-
-## Sharing behavior
-
-New boards are private. Clicking **Copy Link** as the owner explicitly changes that board to:
-
-- `link-edit` while student writing is enabled
-- `link-view` while student writing is disabled
-
-The board is not listed publicly. Someone must have its URL, and all database/Storage access remains enforced by RLS.
+New boards are private. Owners create hashed view/edit invitations. The raw token
+appears only once in the URL fragment, is redeemed into `board_members`, and is
+then removed. Plain `?board=` URLs never grant permission by themselves.

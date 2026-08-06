@@ -264,6 +264,7 @@ export interface Whiteboard {
   name: string;
   description?: string;
   createdAt: number;
+  updatedAt?: number;
   createdBy: string;
   ownerUid?: string;
   accessMode?: "private" | "public" | "shared" | "link-view" | "link-edit";
@@ -280,6 +281,10 @@ export interface Whiteboard {
   changedShardIds?: string[];
   deletedShardIds?: string[];
   totalElements?: number;
+  effectivePermission?: "viewer" | "editor" | "owner" | "admin" | "none";
+  effectiveCanWrite?: boolean;
+  effectiveCanManage?: boolean;
+  legacyLinkDisabled?: boolean;
 }
 
 export interface UserProfile {

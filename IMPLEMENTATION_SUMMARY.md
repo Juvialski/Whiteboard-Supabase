@@ -1,40 +1,53 @@
-# Completed security and free-tier implementation
+# Completed security, reliability, and free-tier implementation
 
-This repository contains the complete first-party implementation of the requested hardening work for one Supabase Free project and one Render Free web service.
+This repository is designed for one Supabase Free project and one Render Free web
+service. It does not require Redis, Edge Functions, a service-role key in the
+browser, persistent Render disks, or paid infrastructure.
 
 ## Implemented
 
-1. Fast `/healthz` monitoring route, production startup validation, graceful shutdown, and Render blueprint.
-2. Public browser/server log collection removed; sensitive server errors are redacted.
-3. Small route-specific API bodies, security headers, origin checks, and in-memory rate limiting.
-4. Gemini API keys are memory-only by default with optional session-only retention; the old permanent key is removed.
-5. Hashed secure share tokens, `board_members`, owner link/member management, expiry, revocation, and one-time URL redemption.
-6. Administrators moved to `private.admin_users`; users may update only safe profile columns.
-7. Direct authenticated shard writes removed; persistence uses the validated mutation RPC only.
-8. Board patches and mutations are allowlisted and validated server-side with bounded sizes, IDs, types, drawing points, timestamps, and media fields.
-9. One authenticated WebSocket per board; verified Supabase sessions, immutable socket identity, RLS permission lookup, rate limits, heartbeat, backpressure, origin validation, and periodic permission refresh.
-10. Anonymous students may redeem valid links but cannot create boards or share links; optional free Turnstile support is included.
-11. Recovery and pending-mutation caches are scoped by Supabase project, user, and board and are cleared after sign-out or denied access.
-12. Private Storage has an approved MIME allowlist, file-signature checks, 20 MB per-file limit, conservative 250 MB per-board quota, owner-only destructive deletion, and no SVG uploads.
-13. Dashboard board listing is lightweight and cursor-paginated; asset downloads use bounded revocable object URLs instead of permanent Base64 copies.
-14. Existing sharded checkpoints and database-free cursor/drawing-preview traffic remain in place for free-tier efficiency.
+1. Fast `/healthz`, production startup checks, graceful shutdown, and Render blueprint.
+2. Sensitive log collection removed; API bodies, origins, headers, and in-memory rates bounded.
+3. Secure hashed share tokens, relational memberships, expiry, revocation, and member removal.
+4. Administrators stored in `private.admin_users`; profile updates are column-restricted.
+5. Direct shard writes blocked; saves use validated atomic mutation RPCs.
+6. Offline queues are project/user/board-scoped, serialized, and restored before cloud hydration.
+7. Large reconnect/paste/import queues use resumable 400-item/approximately-6-MB RPC batches.
+8. One authenticated WebSocket per browser/board with immutable identity and permission refresh.
+9. Anonymous students can redeem valid links but cannot create boards or share links; Turnstile is optional.
+10. Private Storage has MIME/signature checks, 20 MB files, bounded board usage, and a 64 MB object-URL cache.
+11. Dashboard queries are lightweight and keyset-paginated; high-frequency collaboration avoids Postgres.
+12. A safe graph parser replaces runtime JavaScript evaluation and supports graph exports.
+13. PNG/SVG/PDF exports cover persisted media and all noninteractive board element types.
+14. PDF import is bounded to 25 MB/100 pages and initializes through secured RPC batches.
+15. Ordered text-ID migrations generate one atomic fresh-project `supabase-schema.sql`.
 
-## Deployment order
+## Existing production project
 
-1. Existing Supabase project: run `supabase/migrations/202608050002_security_free_tier_hardening.sql` once in SQL Editor.
-2. New Supabase project: run the combined `supabase-schema.sql` instead.
-3. Add the owner to `private.admin_users` using the command in `SECURITY_UPGRADE.md`.
-4. In Render, deploy with `npm install --include=dev && npm run build`, `npm start`, and health path `/healthz`.
-5. Set `APP_ORIGIN`, `VITE_SUPABASE_URL`, and `VITE_SUPABASE_PUBLISHABLE_KEY`. Turnstile is optional.
-6. Existing `link-view`, `link-edit`, and broad `public` access are intentionally invalidated. Create new secure links from the Share dialog.
+The production Supabase project has already received the security and follow-up SQL
+fixes from the preceding rollout. **This source-code follow-up does not require
+another SQL Editor action.** Deploy the application files and run the regression
+checklist in `FINAL_DEPLOYMENT_CHECKLIST.md`.
 
-## Local verification
+## New Supabase project
 
-Run on a machine with npm registry access:
+Run the generated root `supabase-schema.sql` once, configure Auth, then add the
+first administrator as described in `SUPABASE_SETUP.md`.
+
+## Verification command
+
+On a machine with normal npm registry access:
 
 ```bash
-npm install
+npm ci --include=dev
 npm run verify
 ```
 
-Commit the generated `package-lock.json` afterward. `bun.lock` was removed so deployment uses one package manager consistently.
+## Final coordinated reliability pass
+
+- Serialized/coalesced manifest refresh prevents stale revision rollback.
+- Realtime elements and timers receive explicit server schema validation.
+- Long live strokes stay under WebSocket limits while final drawings remain full.
+- Automatic checkpoint retries are bounded and recoverable queues survive safely.
+- Anonymous users cannot abandon unsynced guest-only work.
+- Fresh presence schema and policies now match the text-ID production model.

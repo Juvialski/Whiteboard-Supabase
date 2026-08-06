@@ -1,5 +1,10 @@
 import { createClient, type User } from '@supabase/supabase-js';
-import { evictLegacyBoardCachesFromLocalStorage } from './utils/boardRecoveryCache';
+import {
+  deriveBoardRecoveryProjectScope,
+  evictLegacyBoardCachesFromLocalStorage,
+  setBoardRecoveryProjectScope,
+  setBoardRecoveryUserScope,
+} from './utils/boardRecoveryCache';
 
 const getStoredUrl = (): string => {
   if (typeof window === 'undefined') return '';
@@ -64,6 +69,7 @@ const resilientAuthStorage = typeof window === 'undefined'
 
 const fallbackUrl = 'http://127.0.0.1:54321';
 const fallbackKey = 'supabase-not-configured';
+setBoardRecoveryProjectScope(deriveBoardRecoveryProjectScope(supabaseUrl || fallbackUrl));
 
 export const supabase = createClient(
   supabaseUrl || fallbackUrl,
@@ -124,11 +130,16 @@ export function toCompatAuthUser(user: User | null): CompatAuthUser | null {
 class AuthCompat {
   private cachedUser: CompatAuthUser | null = null;
   get currentUser(): CompatAuthUser | null { return this.cachedUser; }
-  setCurrentUser(user: User | null): void { this.cachedUser = toCompatAuthUser(user); }
+  setCurrentUser(user: User | null): void {
+    this.cachedUser = toCompatAuthUser(user);
+    setBoardRecoveryUserScope(user?.id || null);
+  }
   async authStateReady(): Promise<void> {
     const { data, error } = await supabase.auth.getSession();
     if (error) throw error;
-    this.cachedUser = toCompatAuthUser(data.session?.user || null);
+    const user = data.session?.user || null;
+    this.cachedUser = toCompatAuthUser(user);
+    setBoardRecoveryUserScope(user?.id || null);
   }
 }
 

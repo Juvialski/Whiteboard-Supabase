@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { UserProfile } from "../../types";
+import type { BoardSocketHandle } from "../../services/boardSocketService";
 
 interface WhiteboardHeaderProps {
   isZenMode: boolean;
@@ -23,7 +24,6 @@ interface WhiteboardHeaderProps {
   setIsTopBarHidden: (hidden: boolean) => void;
   onBackToDashboard: () => void;
   boardName: string;
-  boardId: string;
   syncStatus: "synced" | "saving-cloud" | "saved-local" | "offline";
   wsConnected: boolean;
   wsLatency: number | null;
@@ -40,8 +40,7 @@ interface WhiteboardHeaderProps {
   setFollowedUserId: (id: string | null) => void;
   isPresenterMode: boolean;
   setIsPresenterMode: (val: boolean) => void;
-  wsRef: React.MutableRefObject<WebSocket | null>;
-  isTeacher: boolean;
+  wsRef: React.MutableRefObject<BoardSocketHandle | null>;
   canManage?: boolean;
   studentsCanWrite: boolean;
   handleToggleStudentsCanWrite: () => void;
@@ -61,7 +60,6 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   setIsTopBarHidden,
   onBackToDashboard,
   boardName,
-  boardId,
   syncStatus,
   wsConnected,
   wsLatency,
@@ -79,7 +77,6 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   isPresenterMode,
   setIsPresenterMode,
   wsRef,
-  isTeacher,
   canManage = false,
   studentsCanWrite,
   handleToggleStudentsCanWrite,
@@ -267,42 +264,38 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           })}
         </div>
 
-        {/* Presenter Mode Button ("Follow Me") */}
-        <button
-          onClick={() => {
-            const nextState = !isPresenterMode;
-            setIsPresenterMode(nextState);
-            if (nextState) {
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                  type: "request_follow",
-                  boardId,
-                  teacherId: currentUser.id,
-                  teacherName: currentUser.name,
-                }));
+        {/* Presenter Mode is restricted to the server-authorized owner/admin. */}
+        {canManage && (
+          <button
+            onClick={() => {
+              const nextState = !isPresenterMode;
+              setIsPresenterMode(nextState);
+              if (nextState) {
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({
+                    type: "request_follow",
+                    teacherName: currentUser.name,
+                  }));
+                }
+                showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
+              } else {
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
+                }
+                showSyncToast("Exited Presenter Mode.", "info");
               }
-              showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
-            } else {
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                  type: "stop_follow",
-                  boardId,
-                  teacherId: currentUser.id,
-                }));
-              }
-              showSyncToast("Exited Presenter Mode.", "info");
-            }
-          }}
-          className={`hidden md:flex p-1.5 md:px-2.5 md:py-1 rounded-xl font-bold text-xs items-center space-x-1 transition-all cursor-pointer border shrink-0 ${
-            isPresenterMode
-              ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20 ring-2 ring-purple-400"
-              : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
-          }`}
-          title={isPresenterMode ? "Stop Presenter Mode" : "Start Presenter Mode (Broadcast View)"}
-        >
-          <Video className="w-3.5 h-3.5 shrink-0" />
-          <span className="hidden lg:inline">{isPresenterMode ? "Presenting" : "Presenter Mode"}</span>
-        </button>
+            }}
+            className={`hidden md:flex p-1.5 md:px-2.5 md:py-1 rounded-xl font-bold text-xs items-center space-x-1 transition-all cursor-pointer border shrink-0 ${
+              isPresenterMode
+                ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20 ring-2 ring-purple-400"
+                : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
+            }`}
+            title={isPresenterMode ? "Stop Presenter Mode" : "Start Presenter Mode (Broadcast View)"}
+          >
+            <Video className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden lg:inline">{isPresenterMode ? "Presenting" : "Presenter Mode"}</span>
+          </button>
+        )}
 
         {/* Teacher control to allow/disallow student writing */}
         {canManage ? (
@@ -391,7 +384,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
         <button
           onClick={() => handleExportImage('svg')}
           className="hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 shadow-xs items-center space-x-1.5 transition-all cursor-pointer shrink-0"
-          title="Export full board as vector SVG"
+          title="Export full board as an SVG snapshot"
         >
           <FileCode className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
           <span className="hidden lg:inline">Export SVG</span>
@@ -447,41 +440,37 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           {isHeaderMenuOpen && (
             <div className="absolute right-0 top-10 bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2.5 flex flex-col space-y-1.5 z-45 min-w-[210px] text-slate-800 animate-fade-in">
               {/* Presenter Mode */}
-              <button
-                onClick={() => {
-                  const nextState = !isPresenterMode;
-                  setIsPresenterMode(nextState);
-                  if (nextState) {
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({
-                        type: "request_follow",
-                        boardId,
-                        teacherId: currentUser.id,
-                        teacherName: currentUser.name,
-                      }));
+              {canManage && (
+                <button
+                  onClick={() => {
+                    const nextState = !isPresenterMode;
+                    setIsPresenterMode(nextState);
+                    if (nextState) {
+                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                          type: "request_follow",
+                          teacherName: currentUser.name,
+                        }));
+                      }
+                      showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
+                    } else {
+                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
+                      }
+                      showSyncToast("Exited Presenter Mode.", "info");
                     }
-                    showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
-                  } else {
-                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({
-                        type: "stop_follow",
-                        boardId,
-                        teacherId: currentUser.id,
-                      }));
-                    }
-                    showSyncToast("Exited Presenter Mode.", "info");
-                  }
-                  setIsHeaderMenuOpen(false);
-                }}
-                className={`w-full px-3 py-2 rounded-xl font-semibold text-xs flex items-center space-x-2 transition-all cursor-pointer border ${
-                  isPresenterMode
-                    ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20"
-                    : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
-                }`}
-              >
-                <Video className="w-4 h-4 shrink-0" />
-                <span>{isPresenterMode ? "Presenting..." : "Presenter Mode"}</span>
-              </button>
+                    setIsHeaderMenuOpen(false);
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl font-semibold text-xs flex items-center space-x-2 transition-all cursor-pointer border ${
+                    isPresenterMode
+                      ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20"
+                      : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
+                  }`}
+                >
+                  <Video className="w-4 h-4 shrink-0" />
+                  <span>{isPresenterMode ? "Presenting..." : "Presenter Mode"}</span>
+                </button>
+              )}
 
               {/* Teacher lock/unlock or student status */}
               {canManage ? (

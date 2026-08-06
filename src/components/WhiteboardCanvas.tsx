@@ -6,9 +6,19 @@ import { getBoardPermissions } from "../utils/boardPermissions";
 import {
   subscribeToBoardState,
   queueElementMutation,
+  applyRemoteOperation,
+  applyBoardMetadataPatchLocally,
   flushBoardCheckpoint,
+  sanitizeElementForStorage,
+  MAX_SINGLE_ELEMENT_BYTES,
 } from "../services/boardPersistence";
-import { getRealtimeAccessToken } from "../services/realtimeAuth";
+import {
+  getBoardSocketHandle,
+  subscribeBoardSocketMessages,
+  subscribeBoardSocketStatus,
+  type BoardSocketHandle,
+} from "../services/boardSocketService";
+import { createSecureBoardShareLink } from "../services/shareLinkService";
 import {
   BoardElement,
   Point,
@@ -89,9 +99,9 @@ import {
 } from "lucide-react";
 import Markdown from "react-markdown";
 import WorkspaceTimer from "./WorkspaceTimer";
-import { secureEncrypt, secureDecrypt } from "../utils/crypto";
 import { exportPdfWithDrawings } from "../utils/pdf";
-import { loadBoardRecoveryCache, scheduleBoardRecoveryCacheSave } from "../utils/boardRecoveryCache";
+import { exportBoardImage } from "../utils/boardExport";
+import { sampleRealtimeDrawingPoints } from "../utils/realtimeDrawing";
 
 interface CompressedImage {
   base64Str: string;
@@ -107,8 +117,8 @@ interface LaserPoint {
   color: string;
 }
 
-// Client-side image compression utility to handle high volumes of pasted images safely
-// within Supabase documents without needing Supabase Storage.
+// Client-side image compression keeps Storage uploads within the free-tier file limit
+// and reduces bandwidth before the private Supabase Storage upload.
 const compressImage = (file: File): Promise<CompressedImage | null> => {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -275,15 +285,6 @@ interface WhiteboardCanvasProps {
   adminClaim?: boolean;
 }
 
-const getShardId = (id: string, maxShards: number = 10) => {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = ((hash << 5) - hash) + id.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash) % maxShards;
-};
-
 export default function WhiteboardCanvas({
   boardId,
   boardName,
@@ -314,13 +315,14 @@ export default function WhiteboardCanvas({
     zoomRef.current = zoom;
   }, [zoom]);
 
-  // Whiteboard state hydrates from Supabase. IndexedDB provides a local recovery
-  // preview without consuming the small localStorage quota required by OAuth.
+  // Supabase is the authoritative visible board state. User-scoped IndexedDB
+  // retains only unsynced mutations and is merged after access is verified.
   const [elements, setElements] = useState<BoardElement[]>([]);
   
   const [clipboardElements, setClipboardElements] = useState<BoardElement[]>([]);
   const [boardData, setBoardData] = useState<Whiteboard | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [hydrationError, setHydrationError] = useState<string | null>(null);
   const isHydratedRef = useRef(false);
   const [isTopBarHidden, setIsTopBarHidden] = useState(false);
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
@@ -337,7 +339,9 @@ export default function WhiteboardCanvas({
   });
 
   // Real-Time WebSockets Sync & Caching States
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<BoardSocketHandle | null>(null);
+  const canManageRef = useRef(false);
+  const remoteOperationSequenceRef = useRef(0);
   const [wsConnected, setWsConnected] = useState(false);
   const [activeCollaboratorIds, setActiveCollaboratorIds] = useState<string[]>([]);
   const socketCollaboratorsRef = useRef<Record<string, Collaborator>>({});
@@ -355,254 +359,187 @@ export default function WhiteboardCanvas({
   }>>({});
   const [wsLatency, setWsLatency] = useState<number | null>(null);
 
-  // Load the complete local recovery snapshot from IndexedDB while the cloud
-  // manifest is hydrating. The authoritative Supabase state replaces it later.
+  // Recovery and pending-mutation caches are user/project scoped. The canvas
+  // waits for current Supabase authorization before rendering cloud state.
+
+  // Subscribe to the single authenticated board socket shared with persistence.
   useEffect(() => {
-    let cancelled = false;
-    void loadBoardRecoveryCache(boardId).then((cachedElements) => {
-      if (cancelled || isHydratedRef.current || cachedElements.length === 0) return;
-      setElements(cachedElements);
-      elementsRef.current = cachedElements;
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [boardId]);
+    const handle = getBoardSocketHandle(boardId);
+    wsRef.current = handle;
 
-  // Do not load the legacy `drawings_${boardId}` cache here. That cache was
-  // device-local and replaced the authoritative cloud drawing set, making two
-  // collaborators appear to be on separate boards. The full recovery cache
-  // above is only a temporary preview; Supabase always replaces it after load.
-
-  // Connect to the authenticated same-origin WebSocket relay. The server rejects
-  // the old unauthenticated `join` protocol, so the first message must contain
-  // a current Supabase access token and the board ID.
-  useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-    let socket: WebSocket | null = null;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let pingInterval: ReturnType<typeof setInterval> | null = null;
-    let stopped = false;
-    let reconnectAttempt = 0;
-
-    const clearPing = () => {
-      if (pingInterval) clearInterval(pingInterval);
-      pingInterval = null;
+    const announcePresence = () => {
+      if (handle.readyState !== WebSocket.OPEN) return;
+      const currentZoom = Math.max(0.05, zoomRef.current || 1);
+      handle.send(JSON.stringify({
+        type: "cursor",
+        name: currentUser.name,
+        color: currentUser.color,
+        role: currentUser.role,
+        x: (window.innerWidth / 2 - panXRef.current) / currentZoom,
+        y: (window.innerHeight / 2 - panYRef.current) / currentZoom,
+        panX: panXRef.current,
+        panY: panYRef.current,
+        zoom: currentZoom,
+      }));
     };
 
-    const scheduleReconnect = () => {
-      if (stopped || reconnectTimer) return;
-      const baseDelay = Math.min(10_000, 1_000 * 2 ** Math.min(reconnectAttempt, 3));
-      const jitter = Math.floor(Math.random() * 400);
-      reconnectAttempt += 1;
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, baseDelay + jitter);
-    };
-
-    const connect = () => {
-      if (stopped) return;
-      const nextSocket = new WebSocket(wsUrl);
-      socket = nextSocket;
-
-      nextSocket.onopen = () => {
-        void getRealtimeAccessToken()
-          .then((accessToken) => {
-            if (stopped || nextSocket.readyState !== WebSocket.OPEN) return;
-            nextSocket.send(JSON.stringify({
-              type: "authenticate",
-              accessToken,
-              boardId,
-            }));
-          })
-          .catch((error) => {
-            console.error("Unable to authenticate the collaboration socket:", error);
-            if (nextSocket.readyState === WebSocket.OPEN) {
-              nextSocket.close(1008, "Authentication failed");
-            }
-          });
-      };
-
-      nextSocket.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(String(event.data));
-
-          if (msg.type === "authenticated") {
-            if (msg.boardId !== boardId) {
-              nextSocket.close(1008, "Wrong board");
-              return;
-            }
-            reconnectAttempt = 0;
-            wsRef.current = nextSocket;
-            setWsConnected(true);
-            clearPing();
-            pingInterval = setInterval(() => {
-              if (wsRef.current === nextSocket && nextSocket.readyState === WebSocket.OPEN) {
-                nextSocket.send(JSON.stringify({ type: "ping", id: Date.now() }));
-              }
-            }, 15_000);
-            return;
-          }
-
-          if (msg.type === "auth_error") {
-            console.error("Collaboration socket authorization failed:", msg.error || "Unknown error");
-            nextSocket.close(1008, "Authorization failed");
-            return;
-          }
-
-          if (msg.type === "permission_updated") {
-            setBoardData((previous) => previous ? ({
-              ...previous,
-              effectivePermission: msg.permission,
-              effectiveCanWrite: msg.canWrite === true,
-              effectiveCanManage: msg.canManage === true,
-            } as any) : previous);
-            return;
-          }
-
-          // Ignore collaboration traffic until authentication is confirmed.
-          if (wsRef.current !== nextSocket) return;
-
-          if (msg.type === "cursor") {
-            if (msg.userId === currentUser.id) return;
-            const isNew = !socketCollaboratorsRef.current[msg.userId];
-            socketCollaboratorsRef.current[msg.userId] = {
-              id: msg.userId,
-              name: msg.name,
-              color: msg.color,
-              role: msg.role,
-              x: msg.x,
-              y: msg.y,
-              panX: msg.panX,
-              panY: msg.panY,
-              zoom: msg.zoom,
-              lastActive: msg.lastActive,
-            };
-            if (isNew) setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
-
-            if (followedUserIdRef.current === msg.userId) {
-              const targetZoom = msg.zoom !== undefined ? msg.zoom : 1;
-              const containerW = window.innerWidth;
-              const containerH = window.innerHeight;
-
-              if (msg.x !== undefined && msg.y !== undefined) {
-                const targetPanX = containerW / 2 - msg.x * targetZoom;
-                const targetPanY = containerH / 2 - msg.y * targetZoom;
-                setPanX((prev) => prev + (targetPanX - prev) * 0.35);
-                setPanY((prev) => prev + (targetPanY - prev) * 0.35);
-                setZoom((prev) => prev + (targetZoom - prev) * 0.35);
-              } else if (msg.panX !== undefined && msg.panY !== undefined) {
-                setPanX((prev) => prev + (msg.panX - prev) * 0.35);
-                setPanY((prev) => prev + (msg.panY - prev) * 0.35);
-                setZoom((prev) => prev + (targetZoom - prev) * 0.35);
-              }
-            }
-          } else if (msg.type === "request_follow") {
-            if (currentUser.role !== "teacher" && msg.teacherId) {
-              setFollowedUserId(msg.teacherId);
-              showSyncToast(`${msg.teacherName || "Teacher"} is sharing view! Following screen...`, "info");
-            }
-          } else if (msg.type === "stop_follow") {
-            if (currentUser.role !== "teacher") {
-              setFollowedUserId(null);
-              showSyncToast("Teacher has stopped sharing their view.", "info");
-            }
-          } else if (msg.type === "drawing_stream") {
-            remoteDrawingStreamsRef.current[msg.userId] = {
-              points: msg.points,
-              color: msg.color,
-              width: msg.width,
-              isHighlighter: msg.isHighlighter,
-            };
-            remoteDrawingStreamsDirtyRef.current = true;
-          } else if (msg.type === "drawing_stream_end") {
-            delete remoteDrawingStreamsRef.current[msg.userId];
-            remoteDrawingStreamsDirtyRef.current = true;
-          } else if (msg.type === "element_update") {
-            const { elementId, elementData, actionType, isMerge } = msg;
-            setElements((prev) => {
-              let updated: BoardElement[];
-              if (actionType === "delete") {
-                updated = prev.filter((element) => element.id !== elementId);
-              } else {
-                const exists = prev.some((element) => element.id === elementId);
-                if (exists) {
-                  updated = prev.map((element) => element.id === elementId
-                    ? (isMerge ? { ...element, ...elementData, id: elementId } : { ...elementData, id: elementId })
-                    : element);
-                } else {
-                  updated = [...prev, { ...elementData, id: elementId } as BoardElement];
-                }
-              }
-              elementsRef.current = updated;
-              scheduleBoardRecoveryCacheSave(boardId, updated);
-              return updated;
-            });
-          } else if (msg.type === "element_focus") {
-            setRemoteSelections((prev) => ({
-              ...prev,
-              [msg.userId]: {
-                userName: msg.userName,
-                color: msg.color,
-                selectedIds: msg.selectedIds,
-              },
-            }));
-          } else if (msg.type === "laser_point") {
-            if (msg.userId === currentUser.id) return;
-            const now = Date.now();
-            const existing = remoteLaserPointsRef.current[msg.userId] || [];
-            const active = existing.filter((point) => now - point.timestamp < 1500);
-            remoteLaserPointsRef.current[msg.userId] = [
-              ...active,
-              {
-                x: msg.x,
-                y: msg.y,
-                timestamp: msg.timestamp || now,
-                color: msg.color || "#ef4444",
-              },
-            ];
-          } else if (msg.type === "timer_sync") {
-            setSyncedTimerState(msg.state);
-            if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
-            else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
-          } else if (msg.type === "pong") {
-            setWsLatency(Date.now() - msg.id);
-          }
-        } catch (error) {
-          console.error("Client WebSocket message parsing error:", error);
-        }
-      };
-
-      nextSocket.onclose = () => {
-        if (wsRef.current === nextSocket) wsRef.current = null;
-        setWsConnected(false);
-        setWsLatency(null);
-        clearPing();
+    const unsubscribeStatus = subscribeBoardSocketStatus(boardId, (status) => {
+      setWsConnected(status.authenticated);
+      setWsLatency(status.latency);
+      if (status.authenticated) {
+        announcePresence();
+      } else {
         socketCollaboratorsRef.current = {};
         setActiveCollaboratorIds([]);
         setRemoteSelections({});
-        scheduleReconnect();
-      };
+      }
+    });
 
-      nextSocket.onerror = () => {
-        setWsConnected(false);
-      };
-    };
+    const unsubscribeMessages = subscribeBoardSocketMessages(boardId, (msg) => {
+      try {
+        if (msg.type === "permission_updated") {
+          setBoardData((previous) => previous ? ({
+            ...previous,
+            effectivePermission: msg.permission,
+            effectiveCanWrite: msg.canWrite === true,
+            effectiveCanManage: msg.canManage === true,
+          } as any) : previous);
+          return;
+        }
 
-    connect();
+        if (msg.type === "collaborator_probe") {
+          announcePresence();
+          return;
+        }
+
+        if (msg.type === "collaborator_left") {
+          if (typeof msg.userId !== "string") return;
+          if (followedUserIdRef.current === msg.userId) {
+            setFollowedUserId(null);
+            showSyncToast("The collaborator you were following left the board.", "info");
+          }
+          const updated = { ...socketCollaboratorsRef.current };
+          delete updated[msg.userId];
+          socketCollaboratorsRef.current = updated;
+          setActiveCollaboratorIds(Object.keys(updated));
+          setRemoteSelections((previous) => {
+            if (!Object.prototype.hasOwnProperty.call(previous, msg.userId)) return previous;
+            const next = { ...previous };
+            delete next[msg.userId];
+            return next;
+          });
+          delete remoteDrawingStreamsRef.current[msg.userId];
+          remoteDrawingStreamsDirtyRef.current = true;
+          return;
+        }
+
+        if (msg.type === "cursor") {
+          if (msg.userId === currentUser.id) return;
+          const isNew = !socketCollaboratorsRef.current[msg.userId];
+          socketCollaboratorsRef.current[msg.userId] = {
+            id: msg.userId,
+            name: msg.name,
+            color: msg.color,
+            role: msg.role,
+            x: msg.x,
+            y: msg.y,
+            panX: msg.panX,
+            panY: msg.panY,
+            zoom: msg.zoom,
+            lastActive: msg.lastActive,
+          };
+          if (isNew) setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
+
+          if (followedUserIdRef.current === msg.userId) {
+            const targetZoom = msg.zoom !== undefined ? msg.zoom : 1;
+            const containerW = window.innerWidth;
+            const containerH = window.innerHeight;
+
+            if (msg.x !== undefined && msg.y !== undefined) {
+              const targetPanX = containerW / 2 - msg.x * targetZoom;
+              const targetPanY = containerH / 2 - msg.y * targetZoom;
+              setPanX((prev) => prev + (targetPanX - prev) * 0.35);
+              setPanY((prev) => prev + (targetPanY - prev) * 0.35);
+              setZoom((prev) => prev + (targetZoom - prev) * 0.35);
+            } else if (msg.panX !== undefined && msg.panY !== undefined) {
+              setPanX((prev) => prev + (msg.panX - prev) * 0.35);
+              setPanY((prev) => prev + (msg.panY - prev) * 0.35);
+              setZoom((prev) => prev + (targetZoom - prev) * 0.35);
+            }
+          }
+        } else if (msg.type === "request_follow") {
+          if (!canManageRef.current && msg.teacherId) {
+            setFollowedUserId(msg.teacherId);
+            showSyncToast(`${msg.teacherName || "Teacher"} is sharing view! Following screen...`, "info");
+          }
+        } else if (msg.type === "stop_follow") {
+          if (!canManageRef.current) {
+            setFollowedUserId(null);
+            showSyncToast("The presenter has stopped sharing their view.", "info");
+          }
+        } else if (msg.type === "drawing_stream") {
+          remoteDrawingStreamsRef.current[msg.userId] = {
+            points: msg.points,
+            color: msg.color,
+            width: msg.width,
+            isHighlighter: msg.isHighlighter,
+          };
+          remoteDrawingStreamsDirtyRef.current = true;
+        } else if (msg.type === "drawing_stream_end") {
+          delete remoteDrawingStreamsRef.current[msg.userId];
+          remoteDrawingStreamsDirtyRef.current = true;
+        } else if (msg.type === "element_update") {
+          const { elementId, elementData, actionType, isMerge } = msg;
+          if (typeof elementId !== 'string' || !['set', 'delete'].includes(actionType)) return;
+          applyRemoteOperation(boardId, {
+            operationId: `ws-${msg.userId || 'peer'}-${++remoteOperationSequenceRef.current}-${elementId}-${actionType}`,
+            clientId: String(msg.userId || 'peer'),
+            baseRevision: 0,
+            elementId,
+            action: actionType,
+            data: actionType === 'delete' ? null : ({ ...elementData, id: elementId } as BoardElement),
+            updatedAt: Number(msg.lastActive || Date.now()),
+            isMerge: isMerge === true,
+          });
+        } else if (msg.type === "element_focus") {
+          setRemoteSelections((prev) => ({
+            ...prev,
+            [msg.userId]: {
+              userName: msg.userName,
+              color: msg.color,
+              selectedIds: msg.selectedIds,
+            },
+          }));
+        } else if (msg.type === "laser_point") {
+          if (msg.userId === currentUser.id) return;
+          const now = Date.now();
+          const existing = remoteLaserPointsRef.current[msg.userId] || [];
+          const active = existing.filter((point) => now - point.timestamp < 1500);
+          remoteLaserPointsRef.current[msg.userId] = [
+            ...active,
+            {
+              x: msg.x,
+              y: msg.y,
+              timestamp: msg.timestamp || now,
+              color: msg.color || "#ef4444",
+            },
+          ];
+        } else if (msg.type === "timer_sync") {
+          setSyncedTimerState(msg.state);
+          if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
+          else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
+        }
+      } catch (error) {
+        console.error("Client WebSocket message handling error:", error);
+      }
+    });
 
     return () => {
-      stopped = true;
-      clearPing();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      if (wsRef.current === socket) wsRef.current = null;
-      if (socket && socket.readyState <= WebSocket.OPEN) socket.close(1000, "Board closed");
+      unsubscribeMessages();
+      unsubscribeStatus();
+      if (wsRef.current === handle) wsRef.current = null;
     };
-  }, [boardId, currentUser.id, currentUser.role]);
+  }, [boardId, currentUser.id, currentUser.name, currentUser.color, currentUser.role]);
 
   // Keep socket cursors fresh by purging idle collaborators every 5 seconds
   useEffect(() => {
@@ -675,8 +612,6 @@ export default function WhiteboardCanvas({
   }, [activeUsersCount]);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'saving-cloud' | 'saved-local' | 'offline'>('synced');
   const hasUnsavedChanges = useRef<boolean>(false);
-  const pendingSyncElements = useRef<Record<string, { data: any; action: 'set' | 'delete' }>>({});
-  const debounceTimer = useRef<any>(null);
   const isMigratingRef = useRef<boolean>(false);
   const attemptedMigrationRef = useRef<Set<string>>(new Set());
 
@@ -994,20 +929,30 @@ export default function WhiteboardCanvas({
   }, []);
 
   // Permission states using getBoardPermissions
-  const activeAuthUser = auth.currentUser
-    ? { uid: auth.currentUser.uid, admin: adminClaim }
-    : currentUser?.id
-      ? { uid: currentUser.id }
+  const activeAuthUser = isSandboxEnvironment()
+    ? currentUser?.id
+      ? { uid: currentUser.id, admin: adminClaim }
+      : null
+    : auth.currentUser
+      ? { uid: auth.currentUser.uid, admin: adminClaim }
       : null;
 
   const permissions = getBoardPermissions(boardData, activeAuthUser);
 
   const [showReadOnlyAlert, setShowReadOnlyAlert] = useState(false);
   const alertTimeoutRef = useRef<any>(null);
-  const isTeacher = currentUser.role === "teacher" || permissions.isOwner || permissions.isAdmin;
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
   const canWrite = isSandboxEnvironment() || permissions.canWrite;
   const canManage = isSandboxEnvironment() || permissions.canManage;
+  const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
+  const isTeacher = canManage;
+  canManageRef.current = canManage;
+
+  useEffect(() => {
+    if (!canManage && isPresenterMode) {
+      setIsPresenterMode(false);
+    }
+  }, [canManage, isPresenterMode]);
 
   const isPdfBoard = boardName.startsWith("PDF: ");
   const [hasCentered, setHasCentered] = useState(false);
@@ -1143,13 +1088,13 @@ export default function WhiteboardCanvas({
     };
   }, []);
 
-  const triggerReadOnlyAlert = () => {
+  const triggerReadOnlyAlert = React.useCallback(() => {
     setShowReadOnlyAlert(true);
     if (alertTimeoutRef.current) clearTimeout(alertTimeoutRef.current);
     alertTimeoutRef.current = setTimeout(() => {
       setShowReadOnlyAlert(false);
     }, 3000);
-  };
+  }, []);
 
   // In-progress local drawings (drawn locally on canvas for zero-latency feedback)
   const localDrawingPathRef = useRef<SVGPathElement>(null);
@@ -1170,7 +1115,7 @@ export default function WhiteboardCanvas({
     if (isGeneratingPdf) return;
     setIsGeneratingPdf(true);
     try {
-      await exportPdfWithDrawings(elements, boardName);
+      await exportPdfWithDrawings(elements, boardName, boardId);
     } catch (err) {
       console.error("Error exporting PDF:", err);
       alert("Failed to export PDF: " + (err instanceof Error ? err.message : String(err)));
@@ -1179,226 +1124,21 @@ export default function WhiteboardCanvas({
     }
   };
 
-  const handleExportImage = (format: 'png' | 'svg') => {
+  const handleExportImage = async (format: 'png' | 'svg') => {
     try {
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-
-      elements.forEach((el) => {
-        if ('x' in el && 'y' in el) {
-          const bounded = el as any;
-          const w = bounded.width || 140;
-          const h = bounded.height || 60;
-          minX = Math.min(minX, bounded.x);
-          minY = Math.min(minY, bounded.y);
-          maxX = Math.max(maxX, bounded.x + w);
-          maxY = Math.max(maxY, bounded.y + h);
-        } else if (el.type === 'drawing' && el.points) {
-          el.points.forEach((p) => {
-            minX = Math.min(minX, p.x);
-            minY = Math.min(minY, p.y);
-            maxX = Math.max(maxX, p.x);
-            maxY = Math.max(maxY, p.y);
-          });
-        }
-      });
-
-      // If board is empty, default bounding box
-      if (minX === Infinity || minY === Infinity) {
-        minX = 0;
-        minY = 0;
-        maxX = 800;
-        maxY = 600;
-      } else {
-        // Add padding
-        minX -= 50;
-        minY -= 50;
-        maxX += 50;
-        maxY += 50;
-      }
-
-      const exportWidth = maxX - minX;
-      const exportHeight = maxY - minY;
-
-      const escapeXml = (unsafe: string): string => {
-        return unsafe.replace(/[<>&'"]/g, (c) => {
-          switch (c) {
-            case '<': return '&lt;';
-            case '>': return '&gt;';
-            case '&': return '&amp;';
-            case '\'': return '&apos;';
-            case '"': return '&quot;';
-            default: return c;
-          }
-        });
-      };
-
-      let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${exportWidth} ${exportHeight}" width="${exportWidth}" height="${exportHeight}" style="background-color: #f8fafc;">`;
-      
-      svgContent += `<style>
-        .svg-text { font-family: system-ui, -apple-system, sans-serif; font-weight: bold; }
-        .svg-title { font-family: system-ui, -apple-system, sans-serif; font-weight: 900; }
-      </style>`;
-
-      elements.forEach((el) => {
-        if (el.type === 'sticky') {
-          svgContent += `
-            <g id="el-${el.id}">
-              <rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="12" fill="${el.color || '#fef08a'}" stroke="#cbd5e1" stroke-width="1" />
-              <text x="${el.x + el.width/2}" y="${el.y + el.height/2}" dominant-baseline="middle" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="600" class="svg-text">${escapeXml(el.text || '')}</text>
-            </g>
-          `;
-        } else if (el.type === 'shape') {
-          const rx = el.shapeType === 'circle' ? el.width / 2 : 8;
-          const ry = el.shapeType === 'circle' ? el.height / 2 : 8;
-          
-          if (el.shapeType === 'circle') {
-            svgContent += `
-              <g id="el-${el.id}">
-                <ellipse cx="${el.x + el.width/2}" cy="${el.y + el.height/2}" rx="${rx}" ry="${ry}" fill="${el.color || '#bfdbfe'}" stroke="${el.borderColor || '#3b82f6'}" stroke-width="2" />
-                <text x="${el.x + el.width/2}" y="${el.y + el.height/2}" dominant-baseline="middle" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="600" class="svg-text">${escapeXml(el.text || '')}</text>
-              </g>
-            `;
-          } else {
-            svgContent += `
-              <g id="el-${el.id}">
-                <rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="${rx}" fill="${el.color || '#bfdbfe'}" stroke="${el.borderColor || '#3b82f6'}" stroke-width="2" />
-                <text x="${el.x + el.width/2}" y="${el.y + el.height/2}" dominant-baseline="middle" text-anchor="middle" fill="#1e293b" font-size="14" font-weight="600" class="svg-text">${escapeXml(el.text || '')}</text>
-              </g>
-            `;
-          }
-        } else if (el.type === 'text') {
-          svgContent += `
-            <g id="el-${el.id}">
-              <text x="${el.x}" y="${el.y + 20}" fill="${el.color || '#1e293b'}" font-size="${el.fontSize || 16}" font-weight="bold" class="svg-text">${escapeXml(el.text || '')}</text>
-            </g>
-          `;
-        } else if (el.type === 'drawing') {
-          if (el.points && el.points.length > 0) {
-            let pathD = `M ${el.points[0].x} ${el.points[0].y}`;
-            for (let i = 1; i < el.points.length; i++) {
-              pathD += ` L ${el.points[i].x} ${el.points[i].y}`;
-            }
-            svgContent += `
-              <g id="el-${el.id}">
-                <path d="${pathD}" fill="none" stroke="${el.color || '#1e293b'}" stroke-width="${el.width || 3}" stroke-linecap="round" stroke-linejoin="round" opacity="${el.isHighlighter ? 0.4 : 1}" />
-              </g>
-            `;
-          }
-        } else if (el.type === 'stamp') {
-          const bgColor = el.color || '#4f46e5';
-          svgContent += `
-            <g id="el-${el.id}">
-              <rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="16" fill="${bgColor}" stroke="#cbd5e1" stroke-width="1.5" />
-              <text x="${el.x + el.width/2}" y="${el.y + el.height/2}" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-size="13" font-weight="900" class="svg-text">${escapeXml(el.label || 'STAMP')}</text>
-            </g>
-          `;
-        } else if (el.type === 'connector') {
-          const conn = el as ConnectorElement;
-          const fromEl = elements.find((e) => e.id === conn.fromId);
-          const toEl = conn.toId ? elements.find((e) => e.id === conn.toId) : null;
-          
-          if (fromEl) {
-            const start = getElementSocketCoords(fromEl, conn.fromSocket);
-            const end = toEl ? getElementSocketCoords(toEl, conn.toSocket || "top") : (conn.endPoint || start);
-
-            svgContent += `
-              <g id="el-${el.id}">
-                <line x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" stroke="${conn.color || '#475569'}" stroke-width="${conn.strokeWidth || 2.5}" />
-                ${conn.label ? `
-                  <rect x="${(start.x + end.x)/2 - 40}" y="${(start.y + end.y)/2 - 10}" width="80" height="20" rx="4" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-                  <text x="${(start.x + end.x)/2}" y="${(start.y + end.y)/2}" dominant-baseline="middle" text-anchor="middle" fill="#475569" font-size="10" font-weight="bold" class="svg-text">${escapeXml(conn.label)}</text>
-                ` : ''}
-              </g>
-            `;
-          }
-        } else if (el.type === 'math') {
-          svgContent += `
-            <g id="el-${el.id}">
-              <rect x="${el.x}" y="${el.y}" width="${el.width}" height="${el.height}" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" />
-              <text x="${el.x + el.width/2}" y="${el.y + el.height/2}" dominant-baseline="middle" text-anchor="middle" fill="${el.color || '#0f172a'}" font-size="${el.fontSize || 14}" class="svg-text">${escapeXml(el.text || '')}</text>
-            </g>
-          `;
-        } else if (el.type === 'table') {
-          const tbl = el as TableElement;
-          const rows = tbl.rows || 3;
-          const cols = tbl.cols || 3;
-          const cellWidth = tbl.width / cols;
-          const cellHeight = tbl.height / rows;
-          const data = tbl.data || [];
-          const headerBg = tbl.headerBgColor || "#f1f5f9";
-          const cellBg = tbl.cellBgColor || "#ffffff";
-          const borderCol = tbl.borderColor || "#cbd5e1";
-          const textCol = tbl.textColor || "#0f172a";
-
-          svgContent += `<g id="el-${el.id}">`;
-          for (let r = 0; r < rows; r++) {
-            const isH = tbl.hasHeaderRow && r === 0;
-            const bg = isH ? headerBg : cellBg;
-            for (let c = 0; c < cols; c++) {
-              const cx = tbl.x + c * cellWidth;
-              const cy = tbl.y + r * cellHeight;
-              const cellText = data[r]?.[c] || "";
-              svgContent += `
-                <rect x="${cx}" y="${cy}" width="${cellWidth}" height="${cellHeight}" fill="${bg}" stroke="${borderCol}" stroke-width="1" />
-                <text x="${cx + 8}" y="${cy + cellHeight/2}" dominant-baseline="middle" fill="${textCol}" font-size="${tbl.fontSize || 14}" font-weight="${isH ? 'bold' : 'normal'}" class="svg-text">${escapeXml(cellText)}</text>
-              `;
-            }
-          }
-          svgContent += `</g>`;
-        }
-      });
-
-      svgContent += `</svg>`;
-
-      const svgBlob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(svgBlob);
-      const safeBoardName = (boardName || "whiteboard").replace(/[^a-z0-9]/gi, '_').toLowerCase();
-
-      if (format === 'svg') {
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `${safeBoardName}_export.svg`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-        showSyncToast("Vector SVG exported successfully!", "success");
-      } else {
-        const img = new window.Image();
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          canvas.width = exportWidth;
-          canvas.height = exportHeight;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.fillStyle = '#f8fafc';
-            ctx.fillRect(0, 0, exportWidth, exportHeight);
-            ctx.drawImage(img, 0, 0);
-            
-            try {
-              const pngUrl = canvas.toDataURL('image/png');
-              const link = document.createElement('a');
-              link.href = pngUrl;
-              link.download = `${safeBoardName}_export.png`;
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-              showSyncToast("High-resolution PNG exported successfully!", "success");
-            } catch (e) {
-              console.error("Error generating canvas data URL for PNG", e);
-              showSyncToast("Could not export PNG. Please download as SVG instead.", "error");
-            }
-          }
-          URL.revokeObjectURL(url);
-        };
-        img.src = url;
-      }
-    } catch (err: any) {
-      console.error("Export error:", err);
-      showSyncToast("Failed to export image: " + err.message, "error");
+      await exportBoardImage(elements, boardId, boardName, format);
+      showSyncToast(
+        format === 'png'
+          ? "Complete PNG exported successfully!"
+          : "Complete SVG snapshot exported successfully!",
+        "success"
+      );
+    } catch (error) {
+      console.error("Export error:", error);
+      showSyncToast(
+        `Failed to export image: ${error instanceof Error ? error.message : String(error)}`,
+        "error"
+      );
     }
   };
 
@@ -1425,7 +1165,24 @@ export default function WhiteboardCanvas({
       };
     }
 
+    setIsHydrated(false);
+    isHydratedRef.current = false;
+    setHydrationError(null);
+
     const unsubscribe = subscribeToBoardState(boardId, (state) => {
+      if (state.loadState === 'error') {
+        setHydrationError(state.loadError || 'The board could not be loaded.');
+        setIsHydrated(false);
+        isHydratedRef.current = false;
+        return;
+      }
+
+      // The persistence service emits an initial idle/loading snapshot so
+      // subscribers can observe progress. Never treat that empty snapshot as an
+      // authorized board: doing so previously exposed an editable blank canvas
+      // before RLS and pending-mutation recovery had completed.
+      if (state.loadState !== 'ready') return;
+
       setElements(state.elements);
       if (state.boardData) {
         setBoardData({
@@ -1433,6 +1190,7 @@ export default function WhiteboardCanvas({
           ...state.boardData,
         } as Whiteboard);
       }
+      setHydrationError(null);
       setIsHydrated(true);
       isHydratedRef.current = true;
     });
@@ -1453,8 +1211,9 @@ export default function WhiteboardCanvas({
     if (!container) return;
 
     const handleNativeWheel = (e: WheelEvent) => {
+      // Zooming and navigation are safe for viewers. Write permission must only
+      // gate board mutations, never movement around a read-only canvas.
       e.preventDefault();
-      if (!canWriteRef.current) return;
       
       const rect = container.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -1539,10 +1298,7 @@ export default function WhiteboardCanvas({
     };
 
     const handleNativeTouchStart = (e: TouchEvent) => {
-      if (!canWriteRef.current) {
-        if (e.cancelable) e.preventDefault();
-        return;
-      }
+      // Two-finger navigation is available in both edit and view-only modes.
       if (e.touches.length === 2) {
         // Pinch-to-zoom multi-touch trigger
         const t1 = e.touches[0];
@@ -1567,11 +1323,7 @@ export default function WhiteboardCanvas({
     };
 
     const handleNativeTouchMove = (e: TouchEvent) => {
-      if (!canWriteRef.current) {
-        if (e.cancelable) e.preventDefault();
-        return;
-      }
-      // 1. Two-finger pinch-to-zoom
+      // 1. Two-finger pinch-to-zoom (including view-only boards)
       if (e.touches.length === 2 && touchStartData.dist > 0) {
         e.preventDefault();
         const t1 = e.touches[0];
@@ -1646,6 +1398,14 @@ export default function WhiteboardCanvas({
       return;
     }
 
+    // Final client-side write gate. Individual tools already check permission,
+    // but keeping the guard here prevents a missed UI path from applying a local
+    // edit that Supabase will later reject. The database remains authoritative.
+    if (!canWriteRef.current && !isSandboxEnvironment()) {
+      triggerReadOnlyAlert();
+      return;
+    }
+
     const currentElements = elementsRef.current;
     let updatedElements: BoardElement[] = [];
 
@@ -1677,49 +1437,48 @@ export default function WhiteboardCanvas({
       }
     }
 
-    // Snappy UI update
+    const sandbox = isSandboxEnvironment();
+    const currentFullEl = updatedElements.find(el => el.id === elementId);
+
+    // Validate and enqueue the authoritative cloud mutation before changing the
+    // visible canvas or notifying peers. A permission/size failure must not leave
+    // behind an element that exists only in this tab.
+    if (!sandbox) {
+      queueElementMutation(
+        boardId,
+        elementId,
+        actionType === 'delete' ? null : (currentFullEl || processedData),
+        actionType
+      );
+    }
+
     setElements(updatedElements);
     elementsRef.current = updatedElements;
 
-    // Keep recovery data in IndexedDB. Full board snapshots must never be stored
-    // in localStorage because they can block Supabase OAuth PKCE state writes.
-    try {
-      if (isSandboxEnvironment()) {
-        saveSandboxLocalElements(boardId, updatedElements);
-      } else {
-        scheduleBoardRecoveryCacheSave(boardId, updatedElements);
-      }
-    } catch (e) {
-      // IndexedDB/Storage error safely handled
-    }
-
-    // Broadcast update instantly to connected WebSocket peers (saving Supabase reads)
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: "element_update",
-        boardId,
-        elementId,
-        elementData: processedData,
-        actionType,
-        isMerge
-      }));
-    }
-
-    if (isSandboxEnvironment()) {
+    if (sandbox) {
+      saveSandboxLocalElements(boardId, updatedElements);
       hasUnsavedChanges.current = false;
       setSyncStatus('synced');
       return;
     }
 
-    const currentFullEl = updatedElements.find(el => el.id === elementId);
-    queueElementMutation(
-      boardId,
-      elementId,
-      actionType === 'delete' ? null : (currentFullEl || processedData),
-      actionType
-    );
+    // Broadcast only after the durable local queue accepted the mutation.
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "element_update",
+        boardId,
+        elementId,
+        // Property-only UI updates are merged locally above. Send the complete
+        // resulting element so the authenticated relay can validate its type and
+        // peers never construct an incomplete element from a partial patch.
+        elementData: actionType === 'delete' ? undefined : (currentFullEl || processedData),
+        actionType,
+        isMerge: false
+      }));
+    }
+
     setSyncStatus('saved-local');
-  }, [boardId, setElements, setSyncStatus]);
+  }, [boardId, setElements, setSyncStatus, triggerReadOnlyAlert]);
 
   const handleInsertBlankPdfPage = React.useCallback(() => {
     const lastPage = pdfPages[pdfPages.length - 1];
@@ -1905,7 +1664,6 @@ export default function WhiteboardCanvas({
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
     };
   }, [flushPendingChanges, showSyncToast]);
 
@@ -2171,6 +1929,21 @@ export default function WhiteboardCanvas({
       setFollowedUserId(null);
     }
 
+    // View-only users still need to navigate large boards. Panning is local UI
+    // state and does not mutate Supabase, so handle it before the write gate.
+    if (
+      (activeTool === "pan" || e.shiftKey) &&
+      activeTool !== "pencil" &&
+      activeTool !== "highlighter"
+    ) {
+      if (containerRef.current) {
+        containerRectRef.current = containerRef.current.getBoundingClientRect();
+      }
+      setIsPanning(true);
+      setDragStart({ x: e.clientX, y: e.clientY });
+      return;
+    }
+
     if (!canWrite) {
       triggerReadOnlyAlert();
       return;
@@ -2200,19 +1973,9 @@ export default function WhiteboardCanvas({
       return;
     }
 
-    // 1. Hand tool / Pan Canvas mode
+    // Cache the canvas bounds for editing gestures.
     if (containerRef.current) {
       containerRectRef.current = containerRef.current.getBoundingClientRect();
-    }
-    
-    if (
-      (activeTool === "pan" || e.shiftKey) &&
-      activeTool !== "pencil" &&
-      activeTool !== "highlighter"
-    ) {
-      setIsPanning(true);
-      setDragStart({ x: e.clientX, y: e.clientY });
-      return;
     }
 
     // 2. Pencil / Highlighter drawing tool
@@ -2562,7 +2325,7 @@ export default function WhiteboardCanvas({
           userName: currentUser.name,
           color: activeTool === "highlighter" ? `${activeColor}80` : activeColor,
           width: activeTool === "highlighter" ? strokeWidth * 2.5 : strokeWidth,
-          points: updated,
+          points: sampleRealtimeDrawingPoints(updated),
           isHighlighter: activeTool === "highlighter"
         }));
       }
@@ -3138,104 +2901,87 @@ export default function WhiteboardCanvas({
       itemsToPaste = itemsToPaste.slice(0, 10);
       showSyncToast("Pasting capped at 10 items max per batch to prevent lag.", "warning", 4000);
     }
-    
+
+    const sandbox = isSandboxEnvironment();
     const offset = 40;
     const maxZ = elements.length > 0 ? Math.max(...elements.map(e => e.zIndex || 0)) : 0;
     const newPasteIds: string[] = [];
     const pastedElements: BoardElement[] = [];
 
-    const isSolo = activeUsersCount <= 1;
-
-    if (isSolo) {
-      const currentList = [...elementsRef.current];
-      const updatedList = [...currentList];
-
-      for (let i = 0; i < itemsToPaste.length; i++) {
-        const el = itemsToPaste[i];
+    try {
+      for (let i = 0; i < itemsToPaste.length; i += 1) {
+        const source = itemsToPaste[i];
         const newId = `copy-${Math.random().toString(36).substring(2, 11)}`;
-        
-        const newEl = JSON.parse(JSON.stringify(el)) as BoardElement;
+        let newEl = JSON.parse(JSON.stringify(source)) as BoardElement;
         newEl.id = newId;
         newEl.zIndex = maxZ + i + 1;
-        newEl.updatedAt = Date.now();
+        newEl.updatedAt = Date.now() + i;
 
         if ('x' in newEl && 'y' in newEl) {
-          newEl.x += (offset / zoom);
-          newEl.y += (offset / zoom);
+          newEl.x += offset / zoom;
+          newEl.y += offset / zoom;
         }
-        
-        if (newEl.type === 'drawing' && 'points' in newEl) {
-          newEl.points = newEl.points.map((p: any) => ({ x: p.x + (offset / zoom), y: p.y + (offset / zoom) }));
+        if (newEl.type === 'drawing') {
+          newEl.points = simplifyPoints(newEl.points.map((point) => ({
+            x: point.x + offset / zoom,
+            y: point.y + offset / zoom,
+          })), 1.5);
         }
 
-        updatedList.push(newEl);
+        if (!sandbox) {
+          newEl = sanitizeElementForStorage(newEl);
+          const bytes = new TextEncoder().encode(JSON.stringify(newEl)).byteLength;
+          if (bytes > MAX_SINGLE_ELEMENT_BYTES) {
+            throw new Error(`Pasted element is too large (${Math.round(bytes / 1024)} KB).`);
+          }
+        }
+
         newPasteIds.push(newId);
         pastedElements.push(newEl);
-
-        pendingSyncElements.current[newId] = { data: newEl, action: 'set' };
-        pushToUndo({ type: "add", elementId: newId, afterData: newEl });
       }
 
+      // All elements are validated before the first queue write, so an invalid
+      // item cannot leave a partially pasted batch in the local persistence map.
+      if (!sandbox) {
+        pastedElements.forEach((element) => {
+          queueElementMutation(boardId, element.id, element, 'set');
+        });
+      }
+
+      const updatedList = [...elementsRef.current, ...pastedElements];
+      pastedElements.forEach((element) => {
+        pushToUndo({ type: "add", elementId: element.id, afterData: element });
+      });
       setElements(updatedList);
-      scheduleBoardRecoveryCacheSave(boardId, updatedList);
-
-      hasUnsavedChanges.current = true;
-      setSyncStatus('saved-local');
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => {
-        flushPendingChanges();
-      }, 3000);
-
+      elementsRef.current = updatedList;
       setSelectedIds(newPasteIds);
       setSelectedId(null);
       setClipboardElements(pastedElements);
-    } else {
-      setSyncStatus('saving-cloud');
-      
-      const currentList = [...elementsRef.current];
-      const updatedList = [...currentList];
 
-      for (let i = 0; i < itemsToPaste.length; i++) {
-        const el = itemsToPaste[i];
-        const newId = `copy-${Math.random().toString(36).substring(2, 11)}`;
-        
-        const newEl = JSON.parse(JSON.stringify(el)) as BoardElement;
-        newEl.id = newId;
-        newEl.zIndex = maxZ + i + 1;
-        newEl.updatedAt = Date.now();
-        if ('x' in newEl && 'y' in newEl) {
-          newEl.x += (offset / zoom);
-          newEl.y += (offset / zoom);
-        }
-        
-        if (newEl.type === 'drawing' && 'points' in newEl) {
-          newEl.points = newEl.points.map((p: any) => ({ x: p.x + (offset / zoom), y: p.y + (offset / zoom) }));
-        }
-
-        updatedList.push(newEl);
-        newPasteIds.push(newId);
-        pastedElements.push(newEl);
-        pushToUndo({ type: "add", elementId: newId, afterData: newEl });
-
-        queueElementMutation(boardId, newId, newEl, 'set');
-      }
-
-      setElements(updatedList);
-      elementsRef.current = updatedList;
-
-      try {
-        if (!isSandboxEnvironment()) {
-          await flushBoardCheckpoint(boardId, 'pasteElements');
-        }
+      if (sandbox) {
+        saveSandboxLocalElements(boardId, updatedList);
         setSyncStatus('synced');
-        setSelectedIds(newPasteIds);
-        setSelectedId(null);
-        setClipboardElements(pastedElements);
-      } catch (err: any) {
-        console.error("Error pasting elements:", err);
-        setSyncStatus('offline');
-        showSyncToast("Paste failed: " + (err?.message || 'Error'), "error", 10000);
+        return;
       }
+
+      // With collaborators present, publish the manifest immediately so peers see
+      // the paste as one checkpoint. Solo boards use the normal bounded debounce.
+      if (activeUsersCount > 1) {
+        setSyncStatus('saving-cloud');
+        try {
+          await flushBoardCheckpoint(boardId, 'paste-elements');
+          setSyncStatus('synced');
+        } catch (err: any) {
+          console.error("Error pasting elements:", err);
+          setSyncStatus('offline');
+          showSyncToast("Paste saved locally and will retry: " + (err?.message || 'Error'), "warning", 10000);
+        }
+      } else {
+        setSyncStatus('saved-local');
+      }
+    } catch (err: any) {
+      console.error("Unable to paste elements:", err);
+      showSyncToast("Paste failed: " + (err?.message || 'Error'), "error", 10000);
     }
   };
 
@@ -3489,58 +3235,79 @@ export default function WhiteboardCanvas({
 
   // Clear all items on the board
   const handleClearBoard = async () => {
+    if (!canWrite) {
+      triggerReadOnlyAlert();
+      return;
+    }
+
     const elementsToKeep = elements.filter(el => typeof el?.id === "string" && el.id.startsWith("pdf-page-"));
     const elementsToDelete = elements.filter(el => typeof el?.id === "string" && !el.id.startsWith("pdf-page-"));
-
-    setElements(elementsToKeep);
-    elementsRef.current = elementsToKeep;
+    const sandbox = isSandboxEnvironment();
 
     try {
-      if (isSandboxEnvironment()) {
+      // Cloud deletes enter the durable queue before the visible canvas changes.
+      // Sandbox boards never touch the cloud queue, so retained PDF pages remain.
+      if (!sandbox) {
+        elementsToDelete.forEach((el) => {
+          queueElementMutation(boardId, el.id, null, 'delete');
+        });
+      }
+
+      setElements(elementsToKeep);
+      elementsRef.current = elementsToKeep;
+      setSelectedId(null);
+      setSelectedIds([]);
+      setUndoStack([]);
+      setRedoStack([]);
+
+      if (sandbox) {
         saveSandboxLocalElements(boardId, elementsToKeep);
-      } else {
-        scheduleBoardRecoveryCacheSave(boardId, elementsToKeep);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    setSelectedId(null);
-    setSelectedIds([]);
-    setUndoStack([]);
-    setRedoStack([]);
-
-    elementsToDelete.forEach((el) => {
-      queueElementMutation(boardId, el.id, null, 'delete');
-    });
-
-    if (isSandboxEnvironment()) {
-      hasUnsavedChanges.current = false;
-      setSyncStatus('synced');
-    } else {
-      setSyncStatus('saving-cloud');
-      try {
-        await flushBoardCheckpoint(boardId, 'clearBoard');
+        hasUnsavedChanges.current = false;
         setSyncStatus('synced');
-      } catch (err) {
-        console.error("Error clearing whiteboard:", err);
-        setSyncStatus('offline');
+        return;
       }
+
+      setSyncStatus('saving-cloud');
+      await flushBoardCheckpoint(boardId, 'clearBoard');
+      setSyncStatus('synced');
+    } catch (err: any) {
+      console.error("Error clearing whiteboard:", err);
+      setSyncStatus('offline');
+      showSyncToast("Clear failed: " + (err?.message || 'Error'), "error", 10000);
     }
   };
 
   // Toggle student writing permission on the board (Teacher/CanManage Only)
   const handleToggleStudentsCanWrite = async () => {
     if (!canManage) return;
+    const nextStudentsCanWrite = !studentsCanWrite;
     try {
       await setDoc(
         doc(db, "whiteboards", boardId),
-        {
-          studentsCanWrite: !studentsCanWrite,
-        },
+        { studentsCanWrite: nextStudentsCanWrite },
         { merge: true },
+      );
+      applyBoardMetadataPatchLocally(boardId, {
+        studentsCanWrite: nextStudentsCanWrite,
+        updatedAt: Date.now(),
+      });
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "board_settings_changed",
+          studentsCanWrite: nextStudentsCanWrite,
+          updatedAt: Date.now(),
+        }));
+      }
+      showSyncToast(
+        nextStudentsCanWrite ? "Students can edit this board." : "Student editing has been locked.",
+        nextStudentsCanWrite ? "success" : "warning",
       );
     } catch (err) {
       console.error("Error toggling student writing permissions:", err);
+      showSyncToast(
+        `Could not update student access: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
     }
   };
 
@@ -3633,18 +3400,7 @@ export default function WhiteboardCanvas({
 
     try {
       const shareRole = studentsCanWrite ? "editor" : "viewer";
-      const { data, error } = await supabase.rpc("create_board_share_link", {
-        p_board_id: boardId,
-        p_role: shareRole,
-        p_expires_at: null,
-      });
-
-      if (error) throw new Error(error.message);
-
-      const payload = data as any;
-      const rawToken = String(payload?.rawToken || payload?.raw_token || "");
-      if (!rawToken) throw new Error("Supabase did not return a sharing token.");
-
+      const rawToken = await createSecureBoardShareLink(boardId, shareRole);
       const link = `${window.location.origin}/#share=${encodeURIComponent(rawToken)}`;
       await navigator.clipboard.writeText(link);
       setCopiedLink(true);
@@ -3668,11 +3424,35 @@ export default function WhiteboardCanvas({
       id="whiteboard-workspace"
     >
       {!isHydrated && !isSandboxEnvironment() && (
-        <div className="fixed inset-0 bg-slate-50/80 backdrop-blur-xs flex items-center justify-center z-50">
-          <div className="flex flex-col items-center space-y-3">
-            <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
-            <p className="text-xs text-slate-500 font-medium">Hydrating whiteboard canvas...</p>
-          </div>
+        <div className="fixed inset-0 bg-slate-50/90 backdrop-blur-xs flex items-center justify-center z-50 p-6">
+          {hydrationError ? (
+            <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-6 shadow-xl text-center">
+              <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-rose-100 text-rose-600 font-bold">!</div>
+              <h2 className="text-sm font-bold text-slate-900">Unable to load this whiteboard</h2>
+              <p className="mt-2 text-xs leading-relaxed text-slate-600 break-words">{hydrationError}</p>
+              <div className="mt-5 flex justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700"
+                >
+                  Retry
+                </button>
+                <button
+                  type="button"
+                  onClick={onBackToDashboard}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  Back to boards
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center space-y-3">
+              <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
+              <p className="text-xs text-slate-500 font-medium">Loading secure whiteboard state...</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -3683,7 +3463,6 @@ export default function WhiteboardCanvas({
         setIsTopBarHidden={setIsTopBarHidden}
         onBackToDashboard={onBackToDashboard}
         boardName={boardName}
-        boardId={boardId}
         syncStatus={syncStatus}
         wsConnected={wsConnected}
         wsLatency={wsLatency}
@@ -3701,9 +3480,8 @@ export default function WhiteboardCanvas({
         isPresenterMode={isPresenterMode}
         setIsPresenterMode={setIsPresenterMode}
         wsRef={wsRef}
-        isTeacher={isTeacher}
         canManage={canManage}
-        studentsCanWrite={studentsCanWrite}
+        studentsCanWrite={displayedStudentsCanWrite}
         handleToggleStudentsCanWrite={handleToggleStudentsCanWrite}
         isPdfBoard={isPdfBoard}
         handleDownloadPdfWithDrawings={handleDownloadPdfWithDrawings}
@@ -3894,8 +3672,7 @@ export default function WhiteboardCanvas({
                   selectedIdsLength={selectedIds.length}
                   activeTool={activeTool}
                   canWrite={canWrite}
-                  boardId={boardId}
-                  onSelectElement={handleSelectElement}
+                            onSelectElement={handleSelectElement}
                   onUpdateElement={handleUpdateElement}
                   onDeleteElement={handleDeleteElement}
                 />

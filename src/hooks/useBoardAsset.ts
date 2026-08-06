@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getBoardAsset, BoardAssetDoc } from '../services/storageService';
+import {
+  getBoardAsset,
+  releaseBoardAsset,
+  retainBoardAsset,
+  type BoardAssetDoc,
+} from '../services/storageService';
 
 export interface UseBoardAssetResult {
   data: string | null;
@@ -9,8 +14,8 @@ export interface UseBoardAssetResult {
 }
 
 /**
- * Custom React hook to resolve and cache base64 asset data from the private Supabase Storage asset record
- * Never writes base64 back into element or state shards.
+ * Resolves a private Storage asset into a bounded, revocable object-URL cache.
+ * Asset bytes are never written back into element or board-state shards.
  */
 export function useBoardAsset(
   boardId?: string,
@@ -43,6 +48,11 @@ export function useBoardAsset(
     }
 
     let isMounted = true;
+    let retained = false;
+    // Never leave a previously resolved private asset visible while a different
+    // board/account asset is loading. The old retained URL is released by the
+    // previous effect cleanup before this effect runs.
+    setData(fallbackInlineData || null);
     setLoading(true);
     setError(null);
 
@@ -50,6 +60,8 @@ export function useBoardAsset(
       .then((assetDoc: BoardAssetDoc | null) => {
         if (!isMounted) return;
         if (assetDoc && assetDoc.data) {
+          retainBoardAsset(boardId, assetId);
+          retained = true;
           setData(assetDoc.data);
           setError(null);
         } else if (fallbackInlineData) {
@@ -76,6 +88,7 @@ export function useBoardAsset(
 
     return () => {
       isMounted = false;
+      if (retained) releaseBoardAsset(boardId, assetId);
     };
   }, [boardId, assetId, fallbackInlineData, reloadToken]);
 

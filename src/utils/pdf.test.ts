@@ -1,96 +1,105 @@
-import { describe, it, expect, vi } from 'vitest';
-import { pdfToImages, exportPdfWithDrawings } from './pdf';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BoardElement } from '../types';
 
-// Mock pdfjs-dist
+const pdfMocks = vi.hoisted(() => ({
+  numPages: 2,
+  cleanup: vi.fn(),
+  documentDestroy: vi.fn(async () => undefined),
+  loadingDestroy: vi.fn(async () => undefined),
+  render: vi.fn(() => ({ promise: Promise.resolve() })),
+}));
+
 vi.mock('pdfjs-dist', () => ({
   getDocument: vi.fn(() => ({
+    destroy: pdfMocks.loadingDestroy,
     promise: Promise.resolve({
-      numPages: 2,
-      getPage: vi.fn().mockResolvedValue({
-        getViewport: vi.fn(() => ({ width: 800, height: 600 })),
-        render: vi.fn(() => ({ promise: Promise.resolve() }))
-      })
-    })
+      get numPages() { return pdfMocks.numPages; },
+      destroy: pdfMocks.documentDestroy,
+      getPage: vi.fn().mockImplementation(async () => ({
+        cleanup: pdfMocks.cleanup,
+        getViewport: vi.fn(({ scale }: { scale: number }) => ({ width: 800 * scale, height: 600 * scale })),
+        render: pdfMocks.render,
+      })),
+    }),
   })),
-  GlobalWorkerOptions: { workerSrc: '' }
+  GlobalWorkerOptions: { workerSrc: '' },
 }));
 
-// Mock pdf.worker.min.mjs?url to resolve successfully
-vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({
-  default: 'mock-worker-url'
-}));
+vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: 'mock-worker-url' }));
 
-// Mock jspdf
 vi.mock('jspdf', () => {
   const jsPDF = function() {
-    return {
-      addPage: vi.fn(),
-      addImage: vi.fn(),
-      save: vi.fn()
-    };
+    return { addPage: vi.fn(), addImage: vi.fn(), save: vi.fn() };
   };
   return { jsPDF };
 });
 
-describe('pdf.ts', () => {
-  it('pdfToImages processes PDF file', async () => {
-    // Create a mock File object
-    const file = new File(['dummy content'], 'test.pdf', { type: 'application/pdf' });
-    
-    // We need to mock HTMLCanvasElement for the test to work in jsdom
+import {
+  exportPdfWithDrawings,
+  MAX_PDF_FILE_BYTES,
+  MAX_PDF_PAGES,
+  pdfToImages,
+} from './pdf';
+
+describe('pdf utilities', () => {
+  beforeEach(() => {
+    pdfMocks.numPages = 2;
+    pdfMocks.cleanup.mockClear();
+    pdfMocks.documentDestroy.mockClear();
+    pdfMocks.loadingDestroy.mockClear();
+    pdfMocks.render.mockClear();
+
     HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue({
-      drawImage: vi.fn(),
-      fillRect: vi.fn(),
-      fillText: vi.fn(),
-      measureText: vi.fn(() => ({ width: 10 })),
-      save: vi.fn(),
-      restore: vi.fn(),
-      beginPath: vi.fn(),
-      rect: vi.fn(),
-      clip: vi.fn(),
-      moveTo: vi.fn(),
-      lineTo: vi.fn(),
-      stroke: vi.fn(),
-      ellipse: vi.fn(),
-      closePath: vi.fn(),
-      fill: vi.fn(),
-      strokeRect: vi.fn(),
+      drawImage: vi.fn(), fillRect: vi.fn(), fillText: vi.fn(), measureText: vi.fn(() => ({ width: 10 })),
+      save: vi.fn(), restore: vi.fn(), beginPath: vi.fn(), rect: vi.fn(), clip: vi.fn(), moveTo: vi.fn(),
+      lineTo: vi.fn(), stroke: vi.fn(), ellipse: vi.fn(), closePath: vi.fn(), fill: vi.fn(), strokeRect: vi.fn(),
+      scale: vi.fn(), translate: vi.fn(), setLineDash: vi.fn(), arc: vi.fn(), quadraticCurveTo: vi.fn(), bezierCurveTo: vi.fn(),
     }) as any;
-
     HTMLCanvasElement.prototype.toDataURL = vi.fn().mockReturnValue('data:image/jpeg;base64,mock');
-
-    const result = await pdfToImages(file);
-    
-    expect(result.length).toBe(2);
-    expect(result[0].src).toBe('data:image/jpeg;base64,mock');
-    expect(result[0].width).toBe(800);
-    expect(result[0].height).toBe(600);
   });
-  
-  it('exportPdfWithDrawings generates PDF', async () => {
-    const mockElements = [
-      { id: 'pdf-page-1', type: 'image', x: 0, y: 0, width: 800, height: 600, src: 'data:image/jpeg;base64,mock' },
-      { id: 'drawing-1', type: 'drawing', points: [{x: 10, y: 10}, {x: 20, y: 20}], color: '#000', width: 4 },
-      { id: 'sticky-1', type: 'sticky', x: 50, y: 50, width: 100, height: 100, text: 'Hello', color: '#ff0' }
+
+  it('renders pages with a bounded scale and releases PDF resources', async () => {
+    const file = new File(['dummy content'], 'test.pdf', { type: 'application/pdf' });
+    const result = await pdfToImages(file);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      src: 'data:image/jpeg;base64,mock',
+      width: 1200,
+      height: 900,
+    });
+    expect(pdfMocks.cleanup).toHaveBeenCalledTimes(2);
+    expect(pdfMocks.documentDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects oversized and excessive-page PDFs before allocating every page', async () => {
+    const oversized = new File(['x'], 'large.pdf', { type: 'application/pdf' });
+    Object.defineProperty(oversized, 'size', { value: MAX_PDF_FILE_BYTES + 1 });
+    await expect(pdfToImages(oversized)).rejects.toThrow(/upload limit/i);
+
+    pdfMocks.numPages = MAX_PDF_PAGES + 1;
+    const tooManyPages = new File(['x'], 'pages.pdf', { type: 'application/pdf' });
+    await expect(pdfToImages(tooManyPages)).rejects.toThrow(/maximum supported board size/i);
+    expect(pdfMocks.documentDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('exports an annotated PDF board', async () => {
+    const mockElements: BoardElement[] = [
+      { id: 'pdf-page-1', type: 'image', x: 0, y: 0, width: 800, height: 600, src: 'data:image/jpeg;base64,mock', zIndex: 0 },
+      { id: 'drawing-1', type: 'drawing', points: [{ x: 10, y: 10 }, { x: 20, y: 20 }], color: '#000', width: 4, isHighlighter: false, zIndex: 1 },
+      { id: 'sticky-1', type: 'sticky', x: 50, y: 50, width: 100, height: 100, text: 'Hello', color: '#ff0', zIndex: 2 },
     ];
 
-    // Mock Image since jsdom might not handle loading Data URLs correctly in tests without real layout
     const originalImage = global.Image;
     global.Image = class {
-      onload: any;
-      src: string;
-      constructor() {
-        this.src = '';
-        setTimeout(() => {
-          if (this.onload) this.onload();
-        }, 10);
-      }
+      onload: (() => void) | null = null;
+      set src(_value: string) { queueMicrotask(() => this.onload?.()); }
     } as any;
 
-    await exportPdfWithDrawings(mockElements, 'Test Board');
-    
-    // As long as it doesn't throw, it's mostly working.
-    // The jspdf constructor and save method are mocked.
-    global.Image = originalImage;
+    try {
+      await expect(exportPdfWithDrawings(mockElements, 'Test Board')).resolves.toBeUndefined();
+    } finally {
+      global.Image = originalImage;
+    }
   });
 });

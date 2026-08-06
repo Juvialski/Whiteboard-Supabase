@@ -46,7 +46,7 @@ const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "ping"]
 const WRITER_EVENTS = new Set([
   ...VIEWER_EVENTS,
   "drawing_stream", "drawing_stream_end", "element_update", "timer_sync",
-  "request_follow", "stop_follow", "board_manifest_changed",
+  "request_follow", "stop_follow", "board_manifest_changed", "board_settings_changed",
 ]);
 const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus"]);
 const MAX_ROOM_CLIENTS = 20;
@@ -229,8 +229,14 @@ function originAllowed(request: http.IncomingMessage): boolean {
 function remoteKeyForRequest(request: http.IncomingMessage): string {
   const forwarded = request.headers['x-forwarded-for'];
   const raw = Array.isArray(forwarded) ? forwarded[forwarded.length - 1] : forwarded;
-  const forwardedParts = typeof raw === 'string' ? raw.split(',').map((value) => value.trim()).filter(Boolean) : [];
-  return forwardedParts[0] || request.socket.remoteAddress || 'unknown';
+  const forwardedParts = typeof raw === 'string'
+    ? raw.split(',').map((value) => value.trim()).filter(Boolean)
+    : [];
+  // Render is the one trusted proxy in front of this process. When a client
+  // supplies an existing X-Forwarded-For value, trusted proxies append the
+  // address they observed. The right-most value is therefore the only safe
+  // forwarded candidate; trusting the first lets clients evade IP limits.
+  return forwardedParts[forwardedParts.length - 1] || request.socket.remoteAddress || 'unknown';
 }
 
 function releaseSocket(ws: WebSocket): void {
@@ -241,7 +247,25 @@ function releaseSocket(ws: WebSocket): void {
   if (boardId) {
     const clients = rooms.get(boardId);
     clients?.delete(ws);
-    if (clients?.size === 0) rooms.delete(boardId);
+    if (clients?.size === 0) {
+      rooms.delete(boardId);
+    } else if (context.userId && clients) {
+      // A user may have two tabs open. Announce departure only after their last
+      // socket leaves this room so collaborator chips do not flicker.
+      const userStillPresent = Array.from(clients).some(
+        (client) => socketContexts.get(client)?.userId === context.userId,
+      );
+      if (!userStillPresent) {
+        const payload = JSON.stringify({
+          type: "collaborator_left",
+          boardId,
+          userId: context.userId,
+        });
+        for (const client of clients) {
+          if (client.readyState === WebSocket.OPEN) client.send(payload);
+        }
+      }
+    }
   }
   const remaining = Math.max(0, (connectionsByIp.get(context.remoteKey) || 1) - 1);
   if (remaining === 0) connectionsByIp.delete(context.remoteKey);
@@ -278,11 +302,70 @@ function containsForbiddenObjectKey(value: unknown, depth = 0): boolean {
   }
   return false;
 }
+function relayElementDataValid(value: unknown, elementId: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const data = value as Record<string, unknown>;
+  const allowedTypes = new Set(["sticky", "shape", "text", "drawing", "image", "connector", "audio", "stamp", "math", "table"]);
+  if (data.id !== elementId || typeof data.type !== "string" || !allowedTypes.has(data.type)) return false;
+
+  for (const field of ["x", "y", "width", "height", "zIndex", "fontSize", "duration", "strokeWidth"]) {
+    if (data[field] !== undefined && !isFiniteNumber(data[field])) return false;
+  }
+  for (const field of ["assetId", "signatureAssetId", "fromId", "toId"]) {
+    if (data[field] !== undefined && (typeof data[field] !== "string" || (data[field] as string).length > 160)) return false;
+  }
+  if (typeof data.text === "string" && data.text.length > 100_000) return false;
+  if (typeof data.label === "string" && data.label.length > 10_000) return false;
+
+  if (data.type === "drawing") {
+    if (!pointsValid(data.points, 3_000) || !isFiniteNumber(data.width, 0.1, 200)) return false;
+  }
+  if (data.type === "table") {
+    if (typeof data.rows !== "number" || !Number.isInteger(data.rows) || !isFiniteNumber(data.rows, 1, 200) ||
+        typeof data.cols !== "number" || !Number.isInteger(data.cols) || !isFiniteNumber(data.cols, 1, 200) ||
+        !Array.isArray(data.data) || data.data.length > 200 ||
+        !data.data.every((row) => Array.isArray(row) && row.length <= 200 && row.every((cell) => typeof cell === "string" && cell.length <= 100_000))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+type SanitizedTimerState = {
+  isRunning: boolean;
+  mode: "timer" | "stopwatch";
+  remainingSeconds: number;
+  totalSeconds: number;
+  startedAt: number | null;
+};
+
+function sanitizeTimerState(value: unknown): SanitizedTimerState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const state = value as Record<string, unknown>;
+  if (typeof state.isRunning !== "boolean") return null;
+  if (state.mode !== "timer" && state.mode !== "stopwatch") return null;
+  const maxSeconds = 7 * 24 * 60 * 60;
+  if (!isFiniteNumber(state.remainingSeconds, 0, maxSeconds) || !isFiniteNumber(state.totalSeconds, 0, maxSeconds)) return null;
+  const startedAt = state.startedAt === null || state.startedAt === undefined
+    ? null
+    : isFiniteNumber(state.startedAt, 0, Date.now() + 5 * 60_000)
+      ? state.startedAt
+      : undefined;
+  if (startedAt === undefined) return null;
+  return {
+    isRunning: state.isRunning,
+    mode: state.mode,
+    remainingSeconds: state.remainingSeconds,
+    totalSeconds: state.totalSeconds,
+    startedAt,
+  };
+}
+
 function consumeSocketRate(context: SocketContext, type: string): boolean {
   const limits: Record<string, number> = {
     cursor: 300, laser_point: 600, drawing_stream: 300, element_focus: 30,
     element_update: 120, drawing_stream_end: 60, board_manifest_changed: 12,
-    timer_sync: 15, request_follow: 10, stop_follow: 10, ping: 10,
+    timer_sync: 15, request_follow: 10, stop_follow: 10, board_settings_changed: 6, ping: 10,
   };
   const max = limits[type] ?? 30;
   const now = Date.now();
@@ -300,7 +383,7 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
 
   const allowed = context.canWrite ? WRITER_EVENTS : VIEWER_EVENTS;
   if (!allowed.has(type)) return null;
-  if ((type === "request_follow" || type === "stop_follow") && !context.canManage) return null;
+  if ((type === "request_follow" || type === "stop_follow" || type === "board_settings_changed") && !context.canManage) return null;
   const common = { type, boardId: context.boardId, userId: context.userId, lastActive: Date.now() };
 
   switch (type) {
@@ -323,21 +406,28 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
       if (!new Set(["set", "delete"]).has(message.actionType)) return null;
       if (message.actionType !== "delete" && (!message.elementData || typeof message.elementData !== "object" || Array.isArray(message.elementData))) return null;
       if (payloadSize(message.elementData) > 64 * 1024 || containsForbiddenObjectKey(message.elementData)) return null;
-      if (message.actionType !== "delete") {
-        const data = message.elementData as Record<string, unknown>;
-        const allowedTypes = new Set(["sticky", "shape", "text", "drawing", "image", "connector", "audio", "stamp", "math", "table"]);
-        if (typeof data.type !== "string" || !allowedTypes.has(data.type)) return null;
-        if (data.id !== undefined && data.id !== message.elementId) return null;
-      }
+      if (message.actionType !== "delete" && !relayElementDataValid(message.elementData, message.elementId)) return null;
       return { ...common, elementId: message.elementId, elementData: message.actionType === "delete" ? undefined : message.elementData, actionType: message.actionType, isMerge: message.isMerge === true };
     }
-    case "timer_sync":
+    case "timer_sync": {
       if (payloadSize(message.state) > 8 * 1024) return null;
-      return { ...common, state: message.state, isOpen: message.isOpen === true };
+      const state = message.state == null
+        ? { isRunning: false, mode: "timer" as const, remainingSeconds: 300, totalSeconds: 300, startedAt: null }
+        : sanitizeTimerState(message.state);
+      if (!state) return null;
+      return { ...common, state, isOpen: message.isOpen === true };
+    }
     case "request_follow":
       return { ...common, teacherId: context.userId, teacherName: cleanText(message.teacherName, 60, "Teacher") };
     case "stop_follow":
       return { ...common, teacherId: context.userId };
+    case "board_settings_changed":
+      if (typeof message.studentsCanWrite !== "boolean") return null;
+      return {
+        ...common,
+        studentsCanWrite: message.studentsCanWrite,
+        updatedAt: isFiniteNumber(message.updatedAt, 0, Number.MAX_SAFE_INTEGER) ? message.updatedAt : Date.now(),
+      };
     case "board_manifest_changed": {
       if (!isFiniteNumber(message.revision, 0, Number.MAX_SAFE_INTEGER)) return null;
       const normalizeShardIds = (value: unknown): string[] | null => {
@@ -421,9 +511,22 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
   context.lastAuthorizationCheck = Date.now();
   if (context.authTimer) clearTimeout(context.authTimer);
   context.authTimer = null;
+  const existingClients = Array.from(clients);
   clients.add(ws);
   rooms.set(message.boardId, clients);
   ws.send(JSON.stringify({ type: "authenticated", boardId: message.boardId, permission, canWrite, canManage }));
+
+  // Ask existing browsers to announce their current cursor/profile state. This
+  // lets a newly joined collaborator populate the people list immediately
+  // without a database-backed presence read or waiting for mouse movement.
+  const probe = JSON.stringify({
+    type: "collaborator_probe",
+    boardId: message.boardId,
+    userId: userData.user.id,
+  });
+  for (const client of existingClients) {
+    if (client.readyState === WebSocket.OPEN) client.send(probe);
+  }
 }
 
 async function loadAuthoritativeManifest(
@@ -536,7 +639,11 @@ function configureWebSockets(): void {
           const message = JSON.parse(text);
           if (!context.authenticated) return await authenticateSocket(ws, message, context);
           const messageType = cleanText(message?.type, 40);
-          const authorizationMaxAge = VIEWER_EVENTS.has(messageType) ? 60_000 : 10_000;
+          // Keep revocation reasonably fresh without turning drawing traffic into
+          // a database read every few seconds on the Supabase Free plan. Manifest
+          // announcements receive a tighter check and are then verified against
+          // the authoritative board row below.
+          const authorizationMaxAge = messageType === 'board_manifest_changed' ? 30_000 : 60_000;
           if (!(await refreshSocketAuthorization(ws, context, authorizationMaxAge))) return;
           let payload = sanitizeRelayMessage(message, context);
           if (!payload) return;
@@ -551,6 +658,24 @@ function configureWebSockets(): void {
           }
           const clients = context.boardId ? rooms.get(context.boardId) : null;
           if (!clients) return;
+
+          if (payload.type === "board_settings_changed") {
+            // The manager has already committed the setting through patch_board.
+            // Refresh every peer immediately so a newly locked editor cannot keep
+            // sending writes for the normal authorization-cache window.
+            await Promise.all(Array.from(clients).map(async (client) => {
+              if (client === ws || client.readyState !== WebSocket.OPEN) return;
+              const peerContext = socketContexts.get(client);
+              if (!peerContext?.authenticated) return;
+              try {
+                await refreshSocketAuthorization(client, peerContext, 0);
+              } catch (error) {
+                console.error("Peer authorization refresh failed:", safeErrorLabel(error));
+                closePolicy(client, "Authorization refresh failed");
+              }
+            }));
+          }
+
           const encoded = JSON.stringify(payload);
           for (const client of clients) {
             if (client === ws || client.readyState !== WebSocket.OPEN) continue;

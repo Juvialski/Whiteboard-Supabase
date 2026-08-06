@@ -1,7 +1,11 @@
-# Small Gemini Build Mode finishing prompt
+# Optional AI Studio verification instruction
 
-Paste this after uploading the full updated repository:
+The supplied ZIP contains final file contents and should be pasted into matching
+paths without rewriting them. AI Studio only needs to run:
 
 ```text
-Open this updated repository and run npm install, then npm run verify. Fix only genuine TypeScript, test, build, or runtime integration errors you find. Do not redesign the UI and do not weaken these completed protections: secure hashed share links and board_members RLS, private.admin_users, blocked direct board_shards writes, authenticated single WebSocket per board, server-side mutation validation, private Storage MIME/size/path/quota rules, user-scoped IndexedDB caches, removed public log endpoints, and session-only Gemini-key storage. Do not add paid services, Redis, Edge Functions, a service-role browser key, or another server. Preserve Supabase Free and Render Free compatibility. Report the exact files changed and why.
+Run npm ci --include=dev, then npm run verify. Do not redesign the UI, weaken RLS,
+change the secure share-token flow, add direct board_shards writes, split the
+single authenticated board WebSocket, loosen CSP, or add paid infrastructure.
+Report any build/test failure exactly before modifying code.
 ```
