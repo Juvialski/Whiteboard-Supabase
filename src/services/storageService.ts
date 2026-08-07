@@ -364,11 +364,35 @@ function createCachedSource(blob: Blob, fallbackDataUrl?: string): {
   encoding: 'url' | 'base64';
   revocable: boolean;
 } {
+  // Images used to render reliably as data URLs in this app. A later object-URL
+  // cache refactor made Storage-backed images depend on browser blob URL
+  // lifecycle/CSP behavior and caused both newly pasted and reloaded images to
+  // fail in some production browsers. Prefer a self-contained data URL whenever
+  // one is already available; the bounded LRU still limits memory use and the
+  // value never gets written back into board shards.
+  if (fallbackDataUrl?.startsWith('data:image/')) {
+    return { data: fallbackDataUrl, encoding: 'base64', revocable: false };
+  }
   if (canUseObjectUrls()) {
     return { data: URL.createObjectURL(blob), encoding: 'url', revocable: true };
   }
   if (fallbackDataUrl) return { data: fallbackDataUrl, encoding: 'base64', revocable: false };
   throw new Error('This browser cannot create a local media URL.');
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string | undefined> {
+  if (!blob.type.toLowerCase().startsWith('image/')) return undefined;
+  if (typeof FileReader === 'undefined') return undefined;
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = typeof reader.result === 'string' ? reader.result : '';
+      if (value.startsWith('data:image/')) resolve(value);
+      else reject(new Error('The downloaded image could not be converted for display.'));
+    };
+    reader.onerror = () => reject(reader.error || new Error('Unable to read the downloaded image.'));
+    reader.readAsDataURL(blob);
+  });
 }
 
 function metadataToAssetDoc(
@@ -617,6 +641,10 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         .download(metadata.object_path);
       if (downloadError) throw downloadError;
       const normalizedBlob = await normalizeDownloadedAssetBlob(blob, metadata.mime_type);
+      // Render downloaded images from a self-contained data URL. This avoids the
+      // production-only object-URL failure that affected both teachers and
+      // students while keeping Storage as the durable source of truth.
+      const imageDataUrl = await blobToDataUrl(normalizedBlob);
 
       // An account/board cache clear may have happened while Storage was
       // downloading. Never let a completed request repopulate private media
@@ -625,7 +653,7 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         return null;
       }
 
-      const document = cacheLocalBlob(boardId, metadata, normalizedBlob);
+      const document = cacheLocalBlob(boardId, metadata, normalizedBlob, imageDataUrl);
       hashToAssetIdMap.set(hashCacheKey(boardId, document.contentHash), assetId);
       trackOperation('read', 'supabase-asset-metadata-read', 1);
       trackOperation('read', 'supabase-storage-download', 1);

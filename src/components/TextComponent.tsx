@@ -131,6 +131,16 @@ export default function TextComponent({
   const [text, setText] = useState(element.text);
   const [activePopover, setActivePopover] = useState<'font' | 'color' | 'fill' | 'border' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const liveTextSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearLiveTextSyncTimer = () => {
+    if (liveTextSyncTimerRef.current) {
+      clearTimeout(liveTextSyncTimerRef.current);
+      liveTextSyncTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => () => clearLiveTextSyncTimer(), []);
 
   useEffect(() => {
     setText(element.text);
@@ -167,15 +177,28 @@ export default function TextComponent({
     if (e.relatedTarget && (e.relatedTarget as HTMLElement).closest('.lucidspark-action-bar')) {
       return;
     }
+    clearLiveTextSyncTimer();
     setIsEditing(false);
     setActivePopover(null);
     if (text !== element.text) {
-      onUpdate({ text: text });
+      // Always commit the final value immediately on blur.
+      onUpdate({ text });
     }
   };
 
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setText(e.target.value);
+    const nextText = e.target.value;
+    setText(nextText);
+
+    // Text used to sync only when the editor blurred, so students could stare at
+    // an empty textbox while the teacher was typing. Coalesce keystrokes into a
+    // small realtime update roughly five times per second; this stays well under
+    // the relay's element_update rate limit while feeling live.
+    clearLiveTextSyncTimer();
+    liveTextSyncTimerRef.current = setTimeout(() => {
+      liveTextSyncTimerRef.current = null;
+      if (nextText !== element.text) onUpdate({ text: nextText });
+    }, 180);
   };
 
   const handleFormatSelection = (
