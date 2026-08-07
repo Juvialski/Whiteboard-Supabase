@@ -635,6 +635,39 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
   return request;
 }
 
+/**
+ * Creates a short-lived direct Storage URL for an existing private board asset.
+ * This is a rendering fallback only: the signed URL is never persisted into board
+ * state. It bypasses local Blob/object-URL handling when a browser cannot render
+ * an otherwise valid downloaded object.
+ */
+export async function getBoardAssetSignedUrl(
+  boardId: string,
+  assetId: string,
+  expiresInSeconds: number = 10 * 60
+): Promise<string | null> {
+  if (!boardId || !assetId || isSandboxEnvironment()) return null;
+
+  const { data: metadata, error: metadataError } = await supabase
+    .from('board_assets')
+    .select('object_path')
+    .eq('board_id', boardId)
+    .eq('asset_id', assetId)
+    .maybeSingle();
+  if (metadataError) throw new Error(`Unable to read asset metadata: ${metadataError.message}`);
+  if (!metadata?.object_path) return null;
+
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUrl(metadata.object_path, Math.max(60, Math.min(expiresInSeconds, 60 * 60)));
+  if (error) throw new Error(`Unable to create direct asset URL: ${error.message}`);
+  const signedUrl = data?.signedUrl?.trim();
+  if (!signedUrl) return null;
+
+  trackOperation('read', 'supabase-asset-signed-url', 1);
+  return signedUrl;
+}
+
 export async function deleteAssetFromStorage(
   boardId: string,
   assetId: string,

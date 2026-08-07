@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ImageElement, UserProfile } from '../types';
 import { Smile, Trash2, Maximize2, X, Crop, Check, Lock, Unlock, Loader2, AlertCircle } from 'lucide-react';
 import { useBoardAsset } from '../hooks/useBoardAsset';
-import { saveBoardAsset } from '../services/storageService';
+import { getBoardAssetSignedUrl, saveBoardAsset } from '../services/storageService';
 import { isSandboxEnvironment } from '../utils/sandboxGuard';
 
 interface ImageComponentProps {
@@ -45,15 +45,59 @@ export default function ImageComponent({
   const [isCropping, setIsCropping] = useState(false);
   const [crop, setCrop] = useState({ top: 0, left: 0, right: 0, bottom: 0 });
   const [renderError, setRenderError] = useState(false);
-  const [autoRetryCount, setAutoRetryCount] = useState(0);
+  const [directImageSrc, setDirectImageSrc] = useState<string | null>(null);
+  const [directLoading, setDirectLoading] = useState(false);
+  const [directError, setDirectError] = useState<string | null>(null);
+  const [directAttempted, setDirectAttempted] = useState(false);
+
+  const resolvedImageSrc = directImageSrc || imageSrc;
+
+  useEffect(() => {
+    if (!directImageSrc) setRenderError(false);
+  }, [imageSrc, directImageSrc]);
 
   useEffect(() => {
     setRenderError(false);
-  }, [imageSrc]);
+    setDirectImageSrc(null);
+    setDirectLoading(false);
+    setDirectError(null);
+    setDirectAttempted(false);
+  }, [element.assetId, boardId]);
 
+  // If the normal authenticated download path itself fails, try the same
+  // private Storage object through a short-lived signed URL. This distinguishes
+  // local Blob/cache problems from a genuinely missing/corrupt Storage object.
   useEffect(() => {
-    setAutoRetryCount(0);
-  }, [element.assetId]);
+    if (!assetError || !boardId || !element.assetId || directAttempted) return;
+    let cancelled = false;
+    setDirectAttempted(true);
+    setDirectLoading(true);
+    setDirectError(null);
+
+    getBoardAssetSignedUrl(boardId, element.assetId)
+      .then((url) => {
+        if (cancelled) return;
+        if (url) {
+          setDirectImageSrc(url);
+          setRenderError(false);
+        } else {
+          setDirectError('No Storage object was found for this saved image.');
+          setRenderError(true);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setDirectError(error instanceof Error ? error.message : String(error));
+        setRenderError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setDirectLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [assetError, boardId, element.assetId]);
 
   useEffect(() => {
     if (!canWrite) {
@@ -123,7 +167,7 @@ export default function ImageComponent({
   const handleConfirmCrop = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setCropError(null);
-    if (!imageSrc) return;
+    if (!resolvedImageSrc) return;
 
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -189,22 +233,55 @@ export default function ImageComponent({
     img.onerror = () => {
       setCropError("Image loading failed during crop.");
     };
-    img.src = imageSrc;
+    img.src = resolvedImageSrc;
+  };
+
+  const tryDirectStorageImage = async () => {
+    if (!boardId || !element.assetId || directAttempted) return false;
+    setDirectAttempted(true);
+    setDirectLoading(true);
+    setDirectError(null);
+    try {
+      const url = await getBoardAssetSignedUrl(boardId, element.assetId);
+      if (!url) {
+        setDirectError('No Storage object was found for this saved image.');
+        setRenderError(true);
+        return false;
+      }
+      setDirectImageSrc(url);
+      setRenderError(false);
+      return true;
+    } catch (error) {
+      setDirectError(error instanceof Error ? error.message : String(error));
+      setRenderError(true);
+      return false;
+    } finally {
+      setDirectLoading(false);
+    }
   };
 
   const handleRenderedImageError = () => {
-    if (element.assetId && autoRetryCount < 1) {
-      setAutoRetryCount((count) => count + 1);
+    // A Blob URL can fail because of browser/cache lifecycle even when the
+    // private Storage object is healthy. Bypass Blob handling once before
+    // declaring the saved file unusable.
+    if (!directImageSrc && element.assetId && !directAttempted) {
       setRenderError(false);
-      retryAsset();
+      void tryDirectStorageImage();
       return;
     }
+
+    setDirectError((current) => current || (directImageSrc
+      ? 'The Storage file exists, but the browser still cannot decode it as an image.'
+      : 'The downloaded image could not be decoded by the browser.'));
     setRenderError(true);
   };
 
   const handleManualImageRetry = (e?: React.MouseEvent) => {
     e?.stopPropagation();
     setRenderError(false);
+    setDirectImageSrc(null);
+    setDirectError(null);
+    setDirectAttempted(false);
     retryAsset();
   };
 
@@ -236,16 +313,18 @@ export default function ImageComponent({
       >
         {/* Image Content Frame */}
         <div className="w-full h-full relative rounded-xs overflow-hidden flex items-center justify-center group/img">
-          {isAssetLoading ? (
+          {(isAssetLoading || directLoading) && !resolvedImageSrc ? (
             <div className="w-full h-full bg-slate-100 animate-pulse flex items-center justify-center text-slate-400 text-xs gap-1.5 p-2">
               <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
               <span>Loading asset...</span>
             </div>
-          ) : assetError || renderError || !imageSrc ? (
+          ) : renderError || (!resolvedImageSrc && (assetError || directError)) || !resolvedImageSrc ? (
             <div className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center">
               <AlertCircle className="w-4 h-4" />
               <span className="font-semibold">Image unavailable</span>
-              <span className="text-[10px] text-rose-500">The saved image could not be decoded.</span>
+              <span className="text-[10px] text-rose-500 max-w-[92%] break-words">
+                {(directError || assetError?.message || 'The saved image could not be decoded.').slice(0, 180)}
+              </span>
               <button
                 onClick={handleManualImageRetry}
                 className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 rounded font-semibold text-[10px] cursor-pointer"
@@ -255,7 +334,7 @@ export default function ImageComponent({
             </div>
           ) : (
             <img
-              src={imageSrc}
+              src={resolvedImageSrc}
               alt="Pasted canvas content"
               className="w-full h-full object-cover select-none pointer-events-none"
               referrerPolicy="no-referrer"
@@ -297,7 +376,7 @@ export default function ImageComponent({
           )}
           
           {/* Quick full-screen preview button on hover */}
-          {!isCropping && imageSrc && !assetError && !renderError && (
+          {!isCropping && resolvedImageSrc && !renderError && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -475,7 +554,7 @@ export default function ImageComponent({
               <X className="w-6 h-6" />
             </button>
             <img
-              src={imageSrc || ''}
+              src={resolvedImageSrc || ''}
               alt="Full Resolution"
               className="max-w-full max-h-[80vh] rounded-lg shadow-2xl object-contain bg-neutral-900 border border-neutral-800"
               onClick={(e) => e.stopPropagation()} // prevent closing on image click

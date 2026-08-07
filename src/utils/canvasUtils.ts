@@ -4,6 +4,7 @@ export interface CompressedImage {
   base64Str: string;
   width: number;
   height: number;
+  mimeType: string;
 }
 
 // Client-side image compression utility to handle high volumes of pasted images safely
@@ -42,7 +43,7 @@ export const compressImage = (file: File): Promise<CompressedImage | null> => {
         ctx.drawImage(img, 0, 0, width, height);
         // Output as high-quality JPEG (balanced visually and file size-wise)
         const compressedBase64 = canvas.toDataURL("image/jpeg", 0.85);
-        resolve({ base64Str: compressedBase64, width, height });
+        resolve({ base64Str: compressedBase64, width, height, mimeType: "image/jpeg" });
       };
       img.onerror = () => resolve(null);
       img.src = event.target?.result as string;
