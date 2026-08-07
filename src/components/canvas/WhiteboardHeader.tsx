@@ -14,6 +14,11 @@ import {
   Check,
   EyeOff,
   MoreHorizontal,
+  Users,
+  Maximize2,
+  Timer as TimerIcon,
+  Keyboard,
+  Trash2,
 } from "lucide-react";
 import { UserProfile } from "../../types";
 import type { BoardSocketHandle } from "../../services/boardSocketService";
@@ -52,6 +57,11 @@ interface WhiteboardHeaderProps {
   copiedLink: boolean;
   isHeaderMenuOpen: boolean;
   setIsHeaderMenuOpen: (open: boolean) => void;
+  onToggleZenMode?: () => void;
+  onToggleTimer?: () => void;
+  isTimerOpen?: boolean;
+  onOpenShortcuts?: () => void;
+  onOpenClearModal?: () => void;
 }
 
 export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
@@ -88,105 +98,130 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   copiedLink,
   isHeaderMenuOpen,
   setIsHeaderMenuOpen,
+  onToggleZenMode,
+  onToggleTimer,
+  isTimerOpen = false,
+  onOpenShortcuts,
+  onOpenClearModal,
 }) => {
+  const [isPeopleMenuOpen, setIsPeopleMenuOpen] = React.useState(false);
+
+  const collaborators = (activeCollaboratorIds && activeCollaboratorIds.length > 0
+    ? activeCollaboratorIds.map((id) => socketCollaboratorsRef.current[id]).filter(Boolean)
+    : Object.values(socketCollaboratorsRef.current)
+  ).filter((collab: any) => collab.id !== currentUser.id);
+
+  const togglePresenterMode = () => {
+    const nextState = !isPresenterMode;
+    setIsPresenterMode(nextState);
+    if (nextState) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "request_follow",
+          teacherName: currentUser.name,
+        }));
+      }
+      showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
+    } else {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
+      }
+      showSyncToast("Exited Presenter Mode.", "info");
+    }
+  };
+
+  const closeHeaderMenu = () => setIsHeaderMenuOpen(false);
+
   return (
     <div
-      className={`pointer-events-none absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 flex items-center justify-between gap-1.5 z-30 transition-all duration-300 ${
+      className={`pointer-events-none absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 z-30 flex items-center justify-between gap-2 transition-all duration-300 ${
         isZenMode || isTopBarHidden ? "-translate-y-16 opacity-0" : "translate-y-0 opacity-100"
       }`}
     >
-      {/* Left Floating Island */}
-      <div className="pointer-events-auto bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md hover:shadow-lg p-1 sm:p-1.5 flex items-center space-x-1 sm:space-x-1.5 shrink min-w-0 overflow-x-auto scrollbar-none touch-manipulation">
+      {/* Board / history controls */}
+      <div className="pointer-events-auto min-w-0 max-w-[calc(100vw-126px)] sm:max-w-[70vw] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md p-1 flex items-center gap-0.5 sm:gap-1 touch-manipulation">
         <button
           onClick={onBackToDashboard}
-          className="p-1.5 sm:p-2 min-h-[36px] sm:min-h-[40px] hover:bg-slate-100/80 active:bg-slate-200 rounded-xl text-slate-600 hover:text-slate-900 transition-colors flex items-center space-x-1 font-bold text-xs cursor-pointer shrink-0 touch-manipulation"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 active:bg-slate-200 transition-colors flex items-center justify-center gap-1 text-xs font-bold shrink-0"
+          title="All Boards"
         >
           <ChevronLeft className="w-4 h-4" />
-          <span className="hidden md:inline">All Boards</span>
+          <span className="hidden xl:inline">All Boards</span>
         </button>
 
-        <div className="h-4 w-[1px] bg-slate-200 shrink-0 hidden sm:block"></div>
+        <div className="hidden sm:block h-5 w-px bg-slate-200 shrink-0" />
 
-        <div className="flex items-center space-x-1 sm:space-x-2 shrink min-w-0">
-          <h2 className="text-xs sm:text-sm font-semibold leading-tight text-slate-900 flex items-center space-x-1">
-            <span className="truncate max-w-[90px] sm:max-w-[180px]" title={boardName}>{boardName}</span>
-            
-            <div className="hidden sm:flex items-center space-x-1">
-              {/* Unified Sync & WS Status Indicator */}
-              {syncStatus === "synced" && (
-                <span 
-                  className={`border px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center space-x-1.5 transition-colors ${
-                    wsConnected 
-                      ? "bg-emerald-50 text-emerald-700 border-emerald-200/80" 
-                      : "bg-slate-50 text-slate-700 border-slate-200/80"
-                  }`}
-                  title={`Cloud: Synced | WebSockets: ${wsConnected ? `Connected (${wsLatency ?? 0}ms)` : "Disconnected"}`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${wsConnected ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
-                  <span>{wsConnected ? "Live" : "Synced"}</span>
-                </span>
-              )}
-              {syncStatus === "saving-cloud" && (
-                <span className="bg-blue-50 text-blue-700 border border-blue-200/80 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center space-x-1.5">
-                  <Loader2 className="w-2.5 h-2.5 animate-spin text-blue-500" />
-                  <span>Syncing...</span>
-                </span>
-              )}
-              {syncStatus === "saved-local" && (
-                <span className="bg-amber-50 text-amber-700 border border-amber-200/80 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center space-x-1.5" title="Offline-ready local buffer active. Synced to cloud once you pause or others join.">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                  <span>Local Buffer</span>
-                </span>
-              )}
-              {syncStatus === "offline" && (
-                <button
-                  onClick={() => {
-                    showSyncToast("Attempting to force sync offline progress...", "info");
-                    flushPendingChanges();
-                  }}
-                  className="bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 border border-rose-200/80 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center space-x-1.5 cursor-pointer transition-colors touch-manipulation"
-                  title="No internet connection detected or Supabase offline. Click to manually force synchronize progress with Cloud."
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
-                  <span>Offline (Sync)</span>
-                </button>
-              )}
-            </div>
+        <div className="min-w-0 flex items-center gap-1.5 px-1">
+          <span className="truncate max-w-[88px] sm:max-w-[150px] lg:max-w-[220px] text-xs sm:text-sm font-semibold text-slate-900" title={boardName}>
+            {boardName}
+          </span>
 
-            {/* Minimal compact indicator dot for mobile */}
-            <div className="flex sm:hidden items-center px-0.5">
-              <span 
-                className={`w-2 h-2 rounded-full ${
-                  syncStatus === "synced" && wsConnected ? "bg-purple-500 animate-pulse" :
-                  syncStatus === "synced" ? "bg-emerald-500" :
-                  syncStatus === "saving-cloud" ? "bg-blue-500 animate-bounce" :
-                  syncStatus === "saved-local" ? "bg-amber-500 animate-pulse" : "bg-rose-500"
-                }`}
-                title={`Status: ${syncStatus} | WS: ${wsConnected ? "Connected" : "Disconnected"}`}
-              />
-            </div>
-          </h2>
+          {syncStatus === "synced" && (
+            <span
+              className={`hidden sm:flex items-center gap-1 border px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0 ${
+                wsConnected
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
+                  : "bg-slate-50 text-slate-600 border-slate-200/80"
+              }`}
+              title={`Cloud: Synced | WebSockets: ${wsConnected ? `Connected (${wsLatency ?? 0}ms)` : "Disconnected"}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${wsConnected ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
+              {wsConnected ? "Live" : "Synced"}
+            </span>
+          )}
+          {syncStatus === "saving-cloud" && (
+            <span className="hidden sm:flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0">
+              <Loader2 className="w-2.5 h-2.5 animate-spin" />
+              Syncing
+            </span>
+          )}
+          {syncStatus === "saved-local" && (
+            <span className="hidden sm:flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0" title="Changes are buffered locally and will sync when possible.">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+              Local
+            </span>
+          )}
+          {syncStatus === "offline" && (
+            <button
+              onClick={() => {
+                showSyncToast("Attempting to force sync offline progress...", "info");
+                flushPendingChanges();
+              }}
+              className="hidden sm:flex items-center gap-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0"
+              title="Offline. Click to retry sync."
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
+              Offline
+            </button>
+          )}
+
+          <span
+            className={`sm:hidden w-2 h-2 rounded-full shrink-0 ${
+              syncStatus === "synced" && wsConnected ? "bg-emerald-500 animate-pulse" :
+              syncStatus === "synced" ? "bg-emerald-500" :
+              syncStatus === "saving-cloud" ? "bg-blue-500 animate-pulse" :
+              syncStatus === "saved-local" ? "bg-amber-500 animate-pulse" : "bg-rose-500"
+            }`}
+            title={`Status: ${syncStatus}`}
+          />
         </div>
 
-        <div className="h-4 w-[1px] bg-slate-200 shrink-0 hidden md:block"></div>
+        <div className="hidden sm:block h-5 w-px bg-slate-200 shrink-0" />
 
         <button
           onClick={handleUndo}
           disabled={undoStack.length === 0}
-          className={`px-2 py-1 h-8 md:px-2.5 rounded-xl flex items-center space-x-1 font-bold text-xs transition-all cursor-pointer shrink-0 touch-manipulation ${
+          className={`relative min-w-[36px] min-h-[36px] p-2 rounded-xl flex items-center justify-center transition-colors shrink-0 ${
             undoStack.length > 0
-              ? "bg-slate-100 border border-slate-200/80 text-slate-700 hover:bg-slate-200 active:bg-slate-300 hover:text-slate-950 hover:scale-[1.02] active:scale-[0.98]"
-              : "text-slate-300 bg-slate-50 border border-slate-150 cursor-not-allowed"
+              ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100 active:bg-slate-200"
+              : "text-slate-300 cursor-not-allowed"
           }`}
-          title="Undo last action (Ctrl+Z)"
+          title="Undo (Ctrl+Z)"
         >
-          <Undo
-            className={`w-3.5 h-3.5 ${undoStack.length > 0 ? "text-slate-600" : "text-slate-300"}`}
-          />
-          <span className="hidden md:inline">Undo</span>
+          <Undo className="w-4 h-4" />
           {undoStack.length > 0 && (
-            <span className="bg-blue-600 text-white text-[9px] px-1.5 py-0.5 rounded-full font-mono font-extrabold">
-              {undoStack.length}
+            <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-blue-600 text-white text-[8px] font-extrabold flex items-center justify-center">
+              {Math.min(99, undoStack.length)}
             </span>
           )}
         </button>
@@ -194,396 +229,291 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
         <button
           onClick={handleRedo}
           disabled={redoStack.length === 0}
-          className={`px-2 py-1 h-8 md:px-2.5 rounded-xl flex items-center space-x-1 font-bold text-xs transition-all cursor-pointer shrink-0 touch-manipulation ${
+          className={`relative min-w-[36px] min-h-[36px] p-2 rounded-xl flex items-center justify-center transition-colors shrink-0 ${
             redoStack.length > 0
-              ? "bg-slate-100 border border-slate-200/80 text-slate-700 hover:bg-slate-200 active:bg-slate-300 hover:text-slate-950 hover:scale-[1.02] active:scale-[0.98]"
-              : "text-slate-300 bg-slate-50 border border-slate-150 cursor-not-allowed"
+              ? "text-slate-600 hover:text-slate-900 hover:bg-slate-100 active:bg-slate-200"
+              : "text-slate-300 cursor-not-allowed"
           }`}
-          title="Redo last action (Ctrl+Y)"
+          title="Redo (Ctrl+Y)"
         >
-          <Redo
-            className={`w-3.5 h-3.5 ${redoStack.length > 0 ? "text-slate-600" : "text-slate-300"}`}
-          />
-          <span className="hidden md:inline">Redo</span>
+          <Redo className="w-4 h-4" />
           {redoStack.length > 0 && (
-            <span className="bg-blue-600 text-white text-[9px] px-1.5 py-0.5 rounded-full font-mono font-extrabold">
-              {redoStack.length}
+            <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-blue-600 text-white text-[8px] font-extrabold flex items-center justify-center">
+              {Math.min(99, redoStack.length)}
             </span>
           )}
         </button>
       </div>
 
-      {/* Right Floating Island */}
-      <div className="pointer-events-auto bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md hover:shadow-lg p-1 sm:p-1.5 flex items-center space-x-1 sm:space-x-1.5 shrink min-w-0 transition-all">
-        <div className="hidden sm:flex items-center space-x-1.5 bg-slate-100/90 p-1 md:px-2.5 md:py-1 rounded-full text-xs font-bold text-slate-600 border border-slate-200/80 shrink-0" title={`${currentUser.name} (You)`}>
-          <span
-            className="w-2.5 h-2.5 rounded-full shrink-0"
-            style={{ backgroundColor: currentUser.color }}
-          />
-          <span className="hidden md:inline truncate max-w-[80px]">{currentUser.name} (You)</span>
-        </div>
-
-        {/* Online Collaborators Avatars List with Follow Feature */}
-        <div className="hidden sm:flex items-center space-x-1 sm:space-x-1.5 shrink-0">
-          {(activeCollaboratorIds && activeCollaboratorIds.length > 0
-            ? activeCollaboratorIds.map((id) => socketCollaboratorsRef.current[id]).filter(Boolean)
-            : Object.values(socketCollaboratorsRef.current)
-          ).map((collab) => {
-            if (collab.id === currentUser.id) return null;
-            const isFollowed = followedUserId === collab.id;
-            return (
-              <button
-                key={collab.id}
-                onClick={() => setFollowedUserId(collab.id)}
-                className={`p-1 md:px-2.5 md:py-1 rounded-full flex items-center space-x-1.5 text-xs font-bold transition-all cursor-pointer border shrink-0 ${
-                  isFollowed
-                    ? "bg-blue-50 border-blue-500 text-blue-700 ring-2 ring-blue-500/30 scale-105"
-                    : "bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 hover:scale-105"
-                }`}
-                title={isFollowed ? `Stop following ${collab.name}` : `Follow ${collab.name}'s live screen`}
-              >
-                <span
-                  className="w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: collab.color }}
-                />
-                <span className="hidden sm:inline truncate max-w-[80px]">{collab.name}</span>
-                {collab.role === "teacher" && (
-                  <span className="text-[9px] bg-purple-100 text-purple-700 px-1 py-0.2 rounded font-extrabold uppercase">
-                    Teacher
-                  </span>
-                )}
-                {isFollowed ? (
-                  <span className="text-[9px] bg-blue-600 text-white px-1.5 py-0.2 rounded-full font-bold">
-                    Following
-                  </span>
-                ) : (
-                  <span className="text-[9px] text-slate-400 font-medium">Follow</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Presenter Mode is restricted to the server-authorized owner/admin. */}
-        {canManage && (
+      {/* Collaboration / board actions */}
+      <div className="pointer-events-auto relative bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md p-1 flex items-center gap-0.5 sm:gap-1 shrink-0">
+        <div className="relative">
           <button
             onClick={() => {
-              const nextState = !isPresenterMode;
-              setIsPresenterMode(nextState);
-              if (nextState) {
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                  wsRef.current.send(JSON.stringify({
-                    type: "request_follow",
-                    teacherName: currentUser.name,
-                  }));
-                }
-                showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
-              } else {
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                  wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
-                }
-                showSyncToast("Exited Presenter Mode.", "info");
-              }
+              setIsPeopleMenuOpen((open) => !open);
+              setIsHeaderMenuOpen(false);
             }}
-            className={`hidden md:flex p-1.5 md:px-2.5 md:py-1 rounded-xl font-bold text-xs items-center space-x-1 transition-all cursor-pointer border shrink-0 ${
-              isPresenterMode
-                ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20 ring-2 ring-purple-400"
-                : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
+            className={`min-w-[36px] min-h-[36px] p-2 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold border transition-colors ${
+              isPeopleMenuOpen || followedUserId
+                ? "bg-blue-50 border-blue-200 text-blue-700"
+                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
             }`}
-            title={isPresenterMode ? "Stop Presenter Mode" : "Start Presenter Mode (Broadcast View)"}
+            title="People on this board"
           >
-            <Video className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden lg:inline">{isPresenterMode ? "Presenting" : "Presenter Mode"}</span>
+            <div className="hidden sm:flex -space-x-1.5">
+              <span className="w-4 h-4 rounded-full border-2 border-white" style={{ backgroundColor: currentUser.color }} />
+              {collaborators.slice(0, 2).map((collab: any) => (
+                <span key={collab.id} className="w-4 h-4 rounded-full border-2 border-white" style={{ backgroundColor: collab.color }} />
+              ))}
+            </div>
+            <Users className="sm:hidden w-4 h-4" />
+            <span>{collaborators.length + 1}</span>
+          </button>
+
+          {isPeopleMenuOpen && (
+            <div className="absolute right-0 top-11 w-[250px] max-w-[calc(100vw-1rem)] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2 z-50 animate-fade-in">
+              <div className="px-2 py-1.5 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">People</div>
+              <div className="flex items-center gap-2 px-2 py-2 rounded-xl bg-slate-50">
+                <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: currentUser.color }} />
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-700">{currentUser.name} (You)</span>
+              </div>
+              {collaborators.length === 0 ? (
+                <p className="px-2 py-3 text-xs text-slate-400">No one else is connected right now.</p>
+              ) : (
+                <div className="mt-1 space-y-1">
+                  {collaborators.map((collab: any) => {
+                    const isFollowed = followedUserId === collab.id;
+                    return (
+                      <button
+                        key={collab.id}
+                        onClick={() => {
+                          setFollowedUserId(isFollowed ? null : collab.id);
+                          setIsPeopleMenuOpen(false);
+                        }}
+                        className={`w-full px-2 py-2 rounded-xl flex items-center gap-2 text-left border transition-colors ${
+                          isFollowed
+                            ? "bg-blue-50 border-blue-200 text-blue-700"
+                            : "border-transparent hover:bg-slate-50 text-slate-700"
+                        }`}
+                      >
+                        <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: collab.color }} />
+                        <span className="min-w-0 flex-1 truncate text-xs font-semibold">{collab.name}</span>
+                        <span className="text-[9px] font-bold text-slate-400">{isFollowed ? "Following" : "Follow"}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Important active states stay visible without occupying full text buttons. */}
+        {isPresenterMode && canManage && (
+          <button
+            onClick={togglePresenterMode}
+            className="hidden sm:flex min-w-[36px] min-h-[36px] p-2 rounded-xl items-center justify-center bg-purple-600 border border-purple-700 text-white shadow-sm ring-2 ring-purple-400/40"
+            title="Stop Presenter Mode"
+          >
+            <Video className="w-4 h-4" />
           </button>
         )}
 
-        {/* Teacher control to allow/disallow student writing */}
-        {canManage ? (
+        {canManage && (
           <button
             onClick={handleToggleStudentsCanWrite}
-            className={`hidden md:flex p-1.5 md:px-2.5 md:py-1 rounded-xl items-center space-x-1.5 font-bold text-xs transition-all cursor-pointer border shrink-0 ${
+            className={`hidden sm:flex min-w-[36px] min-h-[36px] p-2 rounded-xl items-center justify-center border transition-colors ${
               studentsCanWrite
                 ? "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
-                : "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100 animate-pulse"
+                : "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100"
             }`}
-            title={
-              studentsCanWrite
-                ? "Click to lock board for students (Read Only)"
-                : "Click to unlock board for students (Collaborative)"
-            }
+            title={studentsCanWrite ? "Students can write — click to lock" : "Students are locked — click to allow writing"}
           >
-            {studentsCanWrite ? (
-              <>
-                <Unlock className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden md:inline">Students Can Write</span>
-              </>
-            ) : (
-              <>
-                <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                <span className="hidden md:inline">Students Locked</span>
-              </>
-            )}
+            {studentsCanWrite ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
           </button>
-        ) : (
-          /* Student status indicator */
-          <div
-            className={`hidden md:flex p-1.5 md:px-2.5 md:py-1 rounded-xl items-center space-x-1.5 font-bold text-xs border shrink-0 ${
-              studentsCanWrite
-                ? "bg-emerald-50 border-emerald-100 text-emerald-600"
-                : "bg-amber-50 border-amber-200 text-amber-700"
-            }`}
-            title={studentsCanWrite ? "Collaborative Mode" : "View Only Mode"}
-          >
-            {studentsCanWrite ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-emerald-500 relative flex h-2 w-2 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                <span className="hidden md:inline">Collaborative Mode</span>
-              </>
-            ) : (
-              <>
-                <Lock className="w-3.5 h-3.5 text-amber-500 animate-bounce shrink-0" />
-                <span className="hidden md:inline">View Only Mode</span>
-              </>
-            )}
+        )}
+
+        {!canManage && !studentsCanWrite && (
+          <div className="min-w-[36px] min-h-[36px] p-2 rounded-xl flex items-center justify-center bg-amber-50 border border-amber-200 text-amber-700" title="View Only Mode">
+            <Lock className="w-4 h-4" />
           </div>
         )}
-
-        {isPdfBoard && (
-          <button
-            onClick={handleDownloadPdfWithDrawings}
-            disabled={isGeneratingPdf}
-            className="hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50 shrink-0"
-            title="Download PDF"
-          >
-            {isGeneratingPdf ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                <span className="hidden lg:inline">Exporting...</span>
-              </>
-            ) : (
-              <>
-                <Download className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden lg:inline">Download PDF</span>
-              </>
-            )}
-          </button>
-        )}
-
-        <button
-          onClick={() => handleExportImage('png')}
-          className="hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 shadow-xs items-center space-x-1.5 transition-all cursor-pointer shrink-0"
-          title="Export full board as PNG image"
-        >
-          <ImageIcon className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-          <span className="hidden lg:inline">Export PNG</span>
-        </button>
-
-        <button
-          onClick={() => handleExportImage('svg')}
-          className="hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80 shadow-xs items-center space-x-1.5 transition-all cursor-pointer shrink-0"
-          title="Export full board as an SVG snapshot"
-        >
-          <FileCode className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-          <span className="hidden lg:inline">Export SVG</span>
-        </button>
 
         {canManage && (
           <button
             onClick={copyBoardLink}
-            className={`hidden md:flex p-1.5 md:px-3 md:py-1 rounded-xl text-xs font-medium items-center space-x-1.5 transition-all cursor-pointer shrink-0 ${
+            className={`min-w-[36px] min-h-[36px] px-2 sm:px-3 rounded-xl flex items-center justify-center gap-1.5 text-xs font-bold transition-colors ${
               copiedLink
-                ? "bg-green-500 text-white shadow-xs"
-                : "bg-blue-600 hover:bg-blue-700 text-white shadow-xs"
+                ? "bg-emerald-500 text-white"
+                : "bg-blue-600 hover:bg-blue-700 text-white"
             }`}
-            title="Create secure sharing link"
+            title="Share Canvas"
           >
-            {copiedLink ? (
-              <>
-                <Check className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden lg:inline">Link Copied</span>
-              </>
-            ) : (
-              <>
-                <Share2 className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden lg:inline">Share Canvas</span>
-              </>
-            )}
+            {copiedLink ? <Check className="w-4 h-4" /> : <Share2 className="w-4 h-4" />}
+            <span className="hidden lg:inline">{copiedLink ? "Copied" : "Share"}</span>
           </button>
         )}
 
-        {/* Subtle Button to Hide Header */}
-        <button
-          onClick={() => setIsTopBarHidden(true)}
-          className="hidden md:flex p-1.5 hover:bg-slate-100/80 rounded-xl text-slate-400 hover:text-slate-700 transition-colors cursor-pointer shrink-0"
-          title="Hide Header Controls"
-        >
-          <EyeOff className="w-4 h-4" />
-        </button>
-
-        {/* Mobile Actions Dropdown Menu Button (Mobile Only) */}
-        <div className="relative md:hidden flex items-center">
+        <div className="relative">
           <button
-            onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
-            className={`min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] p-1.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center touch-manipulation active:scale-95 ${
+            onClick={() => {
+              setIsHeaderMenuOpen(!isHeaderMenuOpen);
+              setIsPeopleMenuOpen(false);
+            }}
+            className={`min-w-[36px] min-h-[36px] p-2 rounded-xl border transition-colors flex items-center justify-center ${
               isHeaderMenuOpen
                 ? "bg-slate-100 border-slate-300 text-slate-800"
-                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100 active:bg-slate-200"
+                : "bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100"
             }`}
-            title="More Options"
+            title="More board options"
           >
             <MoreHorizontal className="w-4 h-4" />
           </button>
 
           {isHeaderMenuOpen && (
-            <div className="absolute right-0 top-10 bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2.5 flex flex-col space-y-1.5 z-45 min-w-[210px] text-slate-800 animate-fade-in">
-              {/* Presenter Mode */}
+            <div className="absolute right-0 top-11 w-[235px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-5rem)] overflow-y-auto bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2 z-50 animate-fade-in">
+              <div className="px-2 py-1.5 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Board controls</div>
+
               {canManage && (
                 <button
                   onClick={() => {
-                    const nextState = !isPresenterMode;
-                    setIsPresenterMode(nextState);
-                    if (nextState) {
-                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({
-                          type: "request_follow",
-                          teacherName: currentUser.name,
-                        }));
-                      }
-                      showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
-                    } else {
-                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                        wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
-                      }
-                      showSyncToast("Exited Presenter Mode.", "info");
-                    }
-                    setIsHeaderMenuOpen(false);
+                    togglePresenterMode();
+                    closeHeaderMenu();
                   }}
-                  className={`w-full px-3 py-2 rounded-xl font-semibold text-xs flex items-center space-x-2 transition-all cursor-pointer border ${
-                    isPresenterMode
-                      ? "bg-purple-600 border-purple-700 text-white shadow-md shadow-purple-600/20"
-                      : "bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-700"
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors ${
+                    isPresenterMode ? "bg-purple-600 text-white" : "text-purple-700 hover:bg-purple-50"
                   }`}
                 >
                   <Video className="w-4 h-4 shrink-0" />
-                  <span>{isPresenterMode ? "Presenting..." : "Presenter Mode"}</span>
+                  <span>{isPresenterMode ? "Stop Presenter Mode" : "Presenter Mode"}</span>
                 </button>
               )}
 
-              {/* Teacher lock/unlock or student status */}
-              {canManage ? (
+              {canManage && (
                 <button
                   onClick={() => {
                     handleToggleStudentsCanWrite();
-                    setIsHeaderMenuOpen(false);
+                    closeHeaderMenu();
                   }}
-                  className={`w-full px-3 py-2 rounded-xl flex items-center space-x-2 font-semibold text-xs transition-all cursor-pointer border ${
-                    studentsCanWrite
-                      ? "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
-                      : "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100"
-                  }`}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
                 >
-                  {studentsCanWrite ? (
-                    <>
-                      <Unlock className="w-4 h-4 shrink-0" />
-                      <span>Students Can Write</span>
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-4 h-4 text-amber-600 shrink-0" />
-                      <span>Students Locked</span>
-                    </>
-                  )}
+                  {studentsCanWrite ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                  <span>{studentsCanWrite ? "Lock student writing" : "Allow student writing"}</span>
                 </button>
-              ) : (
-                <div
-                  className={`w-full px-3 py-2 rounded-xl flex items-center space-x-2 font-semibold text-xs border ${
-                    studentsCanWrite
-                      ? "bg-emerald-50 border-emerald-100 text-emerald-600"
-                      : "bg-amber-50 border-amber-200 text-amber-700"
-                  }`}
-                >
-                  {studentsCanWrite ? (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 relative flex h-2 w-2 shrink-0">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                      </span>
-                      <span>Collaborative Mode</span>
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-4 h-4 text-amber-500 shrink-0" />
-                      <span>View Only Mode</span>
-                    </>
-                  )}
+              )}
+              {!canManage && (
+                <div className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 ${studentsCanWrite ? "text-emerald-700 bg-emerald-50" : "text-amber-700 bg-amber-50"}`}>
+                  {studentsCanWrite ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+                  <span>{studentsCanWrite ? "Collaborative Mode" : "View Only Mode"}</span>
                 </div>
               )}
 
-              {/* Download PDF */}
+              <div className="my-1 h-px bg-slate-100" />
+
               {isPdfBoard && (
                 <button
                   onClick={() => {
                     handleDownloadPdfWithDrawings();
-                    setIsHeaderMenuOpen(false);
+                    closeHeaderMenu();
                   }}
                   disabled={isGeneratingPdf}
-                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50 border border-emerald-700"
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors"
                 >
-                  {isGeneratingPdf ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                      <span>Exporting...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Download className="w-4 h-4 shrink-0" />
-                      <span>Download PDF</span>
-                    </>
-                  )}
+                  {isGeneratingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  <span>{isGeneratingPdf ? "Exporting PDF..." : "Download PDF"}</span>
                 </button>
               )}
 
-              {/* Share Canvas */}
-              {canManage && (
+              <button
+                onClick={() => {
+                  handleExportImage("png");
+                  closeHeaderMenu();
+                }}
+                className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <ImageIcon className="w-4 h-4 text-indigo-500" />
+                <span>Export PNG</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  handleExportImage("svg");
+                  closeHeaderMenu();
+                }}
+                className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
+              >
+                <FileCode className="w-4 h-4 text-indigo-500" />
+                <span>Export SVG</span>
+              </button>
+
+              {(onToggleTimer || onToggleZenMode || onOpenShortcuts) && <div className="my-1 h-px bg-slate-100" />}
+
+              {onToggleTimer && (
                 <button
                   onClick={() => {
-                    void copyBoardLink();
-                    setIsHeaderMenuOpen(false);
+                    onToggleTimer();
+                    closeHeaderMenu();
                   }}
-                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition-all cursor-pointer border ${
-                    copiedLink
-                      ? "bg-green-500 border-green-600 text-white"
-                      : "bg-blue-600 border-blue-700 text-white"
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors ${
+                    isTimerOpen ? "bg-indigo-50 text-indigo-700" : "text-slate-700 hover:bg-slate-50"
                   }`}
                 >
-                  {copiedLink ? (
-                    <>
-                      <Check className="w-4 h-4 shrink-0" />
-                      <span>Link Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Share2 className="w-4 h-4 shrink-0" />
-                      <span>Share Canvas</span>
-                    </>
-                  )}
+                  <TimerIcon className="w-4 h-4" />
+                  <span>{isTimerOpen ? "Hide Timer" : "Timer / Stopwatch"}</span>
                 </button>
               )}
 
-              {/* Hide Header */}
+              {onToggleZenMode && (
+                <button
+                  onClick={() => {
+                    onToggleZenMode();
+                    closeHeaderMenu();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <Maximize2 className="w-4 h-4" />
+                  <span>Full Screen / Zen Mode</span>
+                </button>
+              )}
+
+              {onOpenShortcuts && (
+                <button
+                  onClick={() => {
+                    onOpenShortcuts();
+                    closeHeaderMenu();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <Keyboard className="w-4 h-4" />
+                  <span>Keyboard Shortcuts</span>
+                </button>
+              )}
+
+              <div className="my-1 h-px bg-slate-100" />
+
               <button
                 onClick={() => {
                   setIsTopBarHidden(true);
-                  setIsHeaderMenuOpen(false);
+                  closeHeaderMenu();
                 }}
-                className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center space-x-2 transition-all hover:bg-slate-50 text-slate-600 border border-transparent cursor-pointer"
+                className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-600 hover:bg-slate-50 transition-colors"
               >
-                <EyeOff className="w-4 h-4 shrink-0 text-slate-400" />
+                <EyeOff className="w-4 h-4 text-slate-400" />
                 <span>Hide Header</span>
               </button>
+
+              {onOpenClearModal && canManage && (
+                <button
+                  onClick={() => {
+                    onOpenClearModal();
+                    closeHeaderMenu();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-rose-600 hover:bg-rose-50 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Clear Canvas...</span>
+                </button>
+              )}
             </div>
           )}
         </div>

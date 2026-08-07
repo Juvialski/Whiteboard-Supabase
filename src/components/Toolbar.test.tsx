@@ -1,26 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import Toolbar, { Tool } from './Toolbar';
-import { ShapeType } from '../types';
-
-interface ToolbarProps {
-  activeTool: Tool;
-  onChangeTool: (tool: Tool) => void;
-  activeColor: string;
-  onChangeColor: (color: string) => void;
-  activeShape: ShapeType;
-  onChangeShape: (shape: ShapeType) => void;
-  onClearBoard: () => void;
-  zoom: number;
-  onZoomIn: () => void;
-  onZoomOut: () => void;
-  onZoomReset: () => void;
-  strokeWidth: number;
-  onChangeStrokeWidth: (width: number) => void;
-  gridMode: "dots" | "math" | "none";
-  onChangeGridMode: (mode: "dots" | "math" | "none") => void;
-}
+import Toolbar from './Toolbar';
 
 describe('Toolbar', () => {
   const defaultProps = {
@@ -30,8 +11,6 @@ describe('Toolbar', () => {
     onChangeColor: vi.fn(),
     activeShape: 'rect' as const,
     onChangeShape: vi.fn(),
-    onClearBoard: vi.fn(),
-    onOpenClearModal: vi.fn(),
     zoom: 1,
     onZoomIn: vi.fn(),
     onZoomOut: vi.fn(),
@@ -42,29 +21,38 @@ describe('Toolbar', () => {
     onChangeGridMode: vi.fn(),
   };
 
-  it('renders correctly', () => {
+  it('renders the compact primary tools and canvas controls', () => {
     render(<Toolbar {...defaultProps} />);
     expect(screen.getByTitle('Select & Edit (V)')).toBeTruthy();
     expect(screen.getByTitle('Pan Canvas (H)')).toBeTruthy();
-    expect(screen.getByTitle('Clear Whiteboard Canvas')).toBeTruthy();
+    expect(screen.getAllByTitle('More Tools').length).toBeGreaterThan(0);
+    expect(screen.getByTitle('Canvas View Options')).toBeTruthy();
   });
 
-  it('calls onChangeTool when a tool is clicked', () => {
+  it('calls onChangeTool when a primary tool is clicked', () => {
     const onChangeTool = vi.fn();
     render(<Toolbar {...defaultProps} onChangeTool={onChangeTool} />);
-    
-    const panButton = screen.getByTitle('Pan Canvas (H)');
-    fireEvent.click(panButton);
+
+    fireEvent.click(screen.getByTitle('Pan Canvas (H)'));
     expect(onChangeTool).toHaveBeenCalledWith('pan');
   });
 
-  it('calls onClearBoard when trash is clicked', () => {
-    const onOpenClearModal = vi.fn();
-    render(<Toolbar {...defaultProps} onOpenClearModal={onOpenClearModal} />);
-    
-    const clearButton = screen.getByTitle('Clear Whiteboard Canvas');
-    fireEvent.click(clearButton);
-    expect(onOpenClearModal).toHaveBeenCalled();
+  it('keeps secondary tools available through More Tools', () => {
+    const onChangeTool = vi.fn();
+    render(<Toolbar {...defaultProps} onChangeTool={onChangeTool} />);
+
+    fireEvent.click(screen.getAllByTitle('More Tools')[0]);
+    fireEvent.click(screen.getByTitle('Sticky Note (N)'));
+    expect(onChangeTool).toHaveBeenCalledWith('sticky');
+  });
+
+  it('changes the canvas background through View', () => {
+    const onChangeGridMode = vi.fn();
+    render(<Toolbar {...defaultProps} onChangeGridMode={onChangeGridMode} />);
+
+    fireEvent.click(screen.getByTitle('Canvas View Options'));
+    fireEvent.click(screen.getByTitle('Math Grid (Graph Paper)'));
+    expect(onChangeGridMode).toHaveBeenCalledWith('math');
   });
 
   it('calls zoom handlers', () => {
@@ -72,20 +60,20 @@ describe('Toolbar', () => {
     const onZoomOut = vi.fn();
     const onZoomReset = vi.fn();
     render(
-      <Toolbar 
-        {...defaultProps} 
-        onZoomIn={onZoomIn} 
-        onZoomOut={onZoomOut} 
-        onZoomReset={onZoomReset} 
+      <Toolbar
+        {...defaultProps}
+        onZoomIn={onZoomIn}
+        onZoomOut={onZoomOut}
+        onZoomReset={onZoomReset}
       />
     );
-    
+
     fireEvent.click(screen.getByTitle('Zoom In'));
     expect(onZoomIn).toHaveBeenCalled();
-    
+
     fireEvent.click(screen.getByTitle('Zoom Out'));
     expect(onZoomOut).toHaveBeenCalled();
-    
+
     fireEvent.click(screen.getByTitle('Reset Zoom'));
     expect(onZoomReset).toHaveBeenCalled();
   });

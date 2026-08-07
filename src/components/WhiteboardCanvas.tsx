@@ -326,6 +326,15 @@ export default function WhiteboardCanvas({
   const isHydratedRef = useRef(false);
   const [isTopBarHidden, setIsTopBarHidden] = useState(false);
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
+  const [isMinimapVisible, setIsMinimapVisible] = useState(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const saved = window.localStorage.getItem("whiteboard:minimap-visible");
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
 
   // Live Screen Following & Modal States
   const [followedUserId, setFollowedUserId] = useState<string | null>(null);
@@ -337,6 +346,16 @@ export default function WhiteboardCanvas({
     width: typeof window !== "undefined" ? window.innerWidth : 1200,
     height: typeof window !== "undefined" ? window.innerHeight : 800,
   });
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem("whiteboard:minimap-visible", String(isMinimapVisible));
+      } catch {
+        // Storage can be unavailable in private/embedded contexts; visibility still works in-memory.
+      }
+    }
+  }, [isMinimapVisible]);
 
   // Real-Time WebSockets Sync & Caching States
   const wsRef = useRef<BoardSocketHandle | null>(null);
@@ -1076,6 +1095,25 @@ export default function WhiteboardCanvas({
     }
   };
 
+  const handleToggleTimerVisibility = () => {
+    if (!canWrite) {
+      triggerReadOnlyAlert();
+      return;
+    }
+    const nextOpen = !isTimerOpen;
+    setIsTimerOpen(nextOpen);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: "timer_sync",
+          boardId,
+          state: syncedTimerState,
+          isOpen: nextOpen,
+        })
+      );
+    }
+  };
+
   useEffect(() => {
     const handleFullscreenChange = () => {
       const isCurrentlyFullscreen = !!document.fullscreenElement;
@@ -1105,7 +1143,6 @@ export default function WhiteboardCanvas({
   const lastStreamBroadcast = useRef<number>(0);
 
   // Clear confirmation modal state
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // Copy share button state
   const [copiedLink, setCopiedLink] = useState(false);
@@ -3491,6 +3528,11 @@ export default function WhiteboardCanvas({
         copiedLink={copiedLink}
         isHeaderMenuOpen={isHeaderMenuOpen}
         setIsHeaderMenuOpen={setIsHeaderMenuOpen}
+        onToggleZenMode={handleToggleZenMode}
+        onToggleTimer={handleToggleTimerVisibility}
+        isTimerOpen={isTimerOpen}
+        onOpenShortcuts={() => setIsShortcutsOpen(true)}
+        onOpenClearModal={() => setIsClearModalOpen(true)}
       />
 
       {/* Subtle Floating Toggle Button to Show Header when Hidden */}
@@ -3551,13 +3593,6 @@ export default function WhiteboardCanvas({
               setTableRows(r);
               setTableCols(c);
             }}
-            onClearBoard={() => {
-              if (!canWrite) {
-                triggerReadOnlyAlert();
-                return;
-              }
-              setShowClearConfirm(true);
-            }}
             zoom={zoom}
             onZoomIn={handleZoomIn}
             onZoomOut={handleZoomOut}
@@ -3573,29 +3608,9 @@ export default function WhiteboardCanvas({
             onChangeStampShape={handleStampShapeChange}
             isPdfMode={isPdfBoard}
             isZenMode={isZenMode}
-            onToggleZenMode={handleToggleZenMode}
             isTopBarHidden={isTopBarHidden}
-            onOpenShortcuts={() => setIsShortcutsOpen(true)}
-            onOpenClearModal={() => setIsClearModalOpen(true)}
-            onToggleTimer={() => {
-              if (!canWrite) {
-                triggerReadOnlyAlert();
-                return;
-              }
-              const nextOpen = !isTimerOpen;
-              setIsTimerOpen(nextOpen);
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: "timer_sync",
-                    boardId,
-                    state: syncedTimerState,
-                    isOpen: nextOpen,
-                  })
-                );
-              }
-            }}
-            isTimerOpen={isTimerOpen}
+            isMinimapVisible={isMinimapVisible}
+            onToggleMinimap={() => setIsMinimapVisible((visible) => !visible)}
           />
         );
       })()}
@@ -3965,8 +3980,8 @@ export default function WhiteboardCanvas({
       />
 
       {/* Minimap Navigation Control */}
-      {!isZenMode && (
-        <div className="fixed bottom-16 sm:bottom-6 right-3 sm:right-6 z-30 flex flex-col items-end space-y-2">
+      {!isZenMode && isMinimapVisible && (
+        <div className="fixed bottom-16 sm:bottom-5 right-3 sm:right-5 z-30 flex flex-col items-end space-y-2">
           <Minimap
             elements={elements}
             panX={panX}

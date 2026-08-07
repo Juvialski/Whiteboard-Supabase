@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { BoardElement } from '../types';
 import { MapPin, ChevronDown, ChevronUp, Layers } from 'lucide-react';
 
@@ -21,7 +21,26 @@ export default function Minimap({
   containerHeight,
   onPanTo,
 }: MinimapProps) {
-  const [isCollapsed, setIsCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 640);
+  const [isCollapsed, setIsCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const saved = window.localStorage.getItem('whiteboard:minimap-collapsed');
+      if (saved !== null) return saved === 'true';
+    } catch {
+      // Ignore unavailable storage and use the responsive default.
+    }
+    return window.innerWidth < 1280;
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem('whiteboard:minimap-collapsed', String(isCollapsed));
+      } catch {
+        // Storage can be unavailable in private/embedded contexts.
+      }
+    }
+  }, [isCollapsed]);
   const mapRef = useRef<HTMLDivElement>(null);
 
   // Map dimensions
@@ -105,11 +124,10 @@ export default function Minimap({
     return (
       <button
         onClick={() => setIsCollapsed(false)}
-        className="bg-white/95 backdrop-blur-md hover:bg-white text-slate-700 hover:text-blue-600 border border-slate-200/90 shadow-md hover:shadow-lg rounded-2xl p-2.5 flex items-center space-x-1.5 text-xs font-bold cursor-pointer transition-all hover:scale-105 active:scale-95 group"
+        className="bg-white/95 backdrop-blur-md hover:bg-white text-slate-700 hover:text-blue-600 border border-slate-200/90 shadow-md hover:shadow-lg rounded-2xl p-2.5 flex items-center justify-center cursor-pointer transition-all hover:scale-105 active:scale-95 group"
         title="Open Canvas Minimap"
       >
         <Layers className="w-4 h-4 text-blue-600" />
-        <span className="hidden sm:inline">Map</span>
       </button>
     );
   }
