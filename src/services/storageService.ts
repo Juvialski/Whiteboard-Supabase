@@ -165,6 +165,22 @@ export function releaseBoardAsset(boardId: string, assetId: string): void {
   evictUnretainedAssets();
 }
 
+/**
+ * Invalidates one cached asset so the next read is forced back to Storage.
+ * This is used when the browser reports that an object URL can no longer be
+ * decoded (for example after a revoked/stale blob URL).
+ */
+export function invalidateBoardAsset(boardId: string, assetId: string): void {
+  if (!boardId || !assetId) return;
+  const key = cacheKeyFor(boardId, assetId);
+  const cached = assetCacheMap.get(key);
+  if (cached?.document.contentHash) {
+    hashToAssetIdMap.delete(hashCacheKey(boardId, cached.document.contentHash));
+  }
+  removeCacheEntry(key);
+  inFlightAssetRequests.delete(key);
+}
+
 export async function computeSHA256Hash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
   if (typeof crypto !== 'undefined' && crypto.subtle) {
@@ -278,6 +294,20 @@ function startsWithBytes(bytes: Uint8Array, signature: number[], offset = 0): bo
   return signature.every((value, index) => bytes[offset + index] === value);
 }
 
+function detectAssetMime(bytes: Uint8Array): string | null {
+  const ascii = new TextDecoder('ascii').decode(bytes);
+  if (startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (startsWithBytes(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a')) return 'image/gif';
+  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') return 'image/webp';
+  if (ascii.startsWith('%PDF-')) return 'application/pdf';
+  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WAVE') return 'audio/wav';
+  if (ascii.startsWith('OggS')) return 'audio/ogg';
+  if (startsWithBytes(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return 'audio/webm';
+  if (ascii.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
+  return null;
+}
+
 async function assertBlobMatchesMime(blob: Blob, mimeType: string): Promise<void> {
   const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
   const ascii = new TextDecoder('ascii').decode(bytes);
@@ -349,6 +379,55 @@ function metadataToAssetDoc(
     createdBy: row.created_by || undefined,
     objectPath: row.object_path,
   };
+}
+
+async function normalizeDownloadedAssetBlob(blob: Blob, expectedMimeType: string): Promise<Blob> {
+  if (!blob || blob.size <= 0) {
+    throw new Error('Storage returned an empty asset.');
+  }
+
+  const normalizedMime = (expectedMimeType || blob.type || '').toLowerCase().split(';')[0].trim();
+  let candidate = normalizedMime && blob.type !== normalizedMime
+    ? blob.slice(0, blob.size, normalizedMime)
+    : blob;
+
+  if (!ALLOWED_ASSET_MIME_TYPES.has(normalizedMime)) return candidate;
+
+  try {
+    await assertBlobMatchesMime(candidate, normalizedMime);
+    return candidate;
+  } catch (signatureError) {
+    // Older rows may have incorrect MIME metadata even though the object bytes
+    // are still healthy. Detect the actual supported type before giving up.
+    const header = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+    const detectedMime = detectAssetMime(header);
+    if (detectedMime && ALLOWED_ASSET_MIME_TYPES.has(detectedMime)) {
+      const recovered = blob.slice(0, blob.size, detectedMime);
+      await assertBlobMatchesMime(recovered, detectedMime);
+      return recovered;
+    }
+
+    // A few legacy deployments accidentally stored the complete data URL as
+    // text instead of the decoded media bytes. Recover those objects in-memory
+    // so old boards can still render without rewriting board data.
+    if (blob.size <= MAX_SAFE_ASSET_BYTES) {
+      try {
+        const legacyText = (await blob.text()).trim();
+        if (legacyText.startsWith('data:')) {
+          const recovered = await dataUrlToBlob(legacyText);
+          const recoveredMime = (recovered.type || normalizedMime).toLowerCase().split(';')[0].trim();
+          if (ALLOWED_ASSET_MIME_TYPES.has(recoveredMime)) {
+            await assertBlobMatchesMime(recovered, recoveredMime);
+            return recovered;
+          }
+        }
+      } catch {
+        // Keep the original signature error below; it is more useful than a
+        // secondary legacy-decoding failure.
+      }
+    }
+    throw signatureError;
+  }
 }
 
 function cacheLocalBlob(
@@ -526,6 +605,7 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         .from(BUCKET)
         .download(metadata.object_path);
       if (downloadError) throw downloadError;
+      const normalizedBlob = await normalizeDownloadedAssetBlob(blob, metadata.mime_type);
 
       // An account/board cache clear may have happened while Storage was
       // downloading. Never let a completed request repopulate private media
@@ -534,7 +614,7 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         return null;
       }
 
-      const document = cacheLocalBlob(boardId, metadata, blob);
+      const document = cacheLocalBlob(boardId, metadata, normalizedBlob);
       hashToAssetIdMap.set(hashCacheKey(boardId, document.contentHash), assetId);
       trackOperation('read', 'supabase-asset-metadata-read', 1);
       trackOperation('read', 'supabase-storage-download', 1);

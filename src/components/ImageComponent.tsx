@@ -44,6 +44,16 @@ export default function ImageComponent({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCropping, setIsCropping] = useState(false);
   const [crop, setCrop] = useState({ top: 0, left: 0, right: 0, bottom: 0 });
+  const [renderError, setRenderError] = useState(false);
+  const [autoRetryCount, setAutoRetryCount] = useState(0);
+
+  useEffect(() => {
+    setRenderError(false);
+  }, [imageSrc]);
+
+  useEffect(() => {
+    setAutoRetryCount(0);
+  }, [element.assetId]);
 
   useEffect(() => {
     if (!canWrite) {
@@ -182,6 +192,22 @@ export default function ImageComponent({
     img.src = imageSrc;
   };
 
+  const handleRenderedImageError = () => {
+    if (element.assetId && autoRetryCount < 1) {
+      setAutoRetryCount((count) => count + 1);
+      setRenderError(false);
+      retryAsset();
+      return;
+    }
+    setRenderError(true);
+  };
+
+  const handleManualImageRetry = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setRenderError(false);
+    retryAsset();
+  };
+
   const cursorClass = element.locked 
     ? 'cursor-default' 
     : activeTool === 'select' 
@@ -215,22 +241,25 @@ export default function ImageComponent({
               <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
               <span>Loading asset...</span>
             </div>
-          ) : assetError && !imageSrc ? (
+          ) : assetError || renderError || !imageSrc ? (
             <div className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center">
-              <span>Asset load failed</span>
+              <AlertCircle className="w-4 h-4" />
+              <span className="font-semibold">Image unavailable</span>
+              <span className="text-[10px] text-rose-500">The saved image could not be decoded.</span>
               <button
-                onClick={retryAsset}
+                onClick={handleManualImageRetry}
                 className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 rounded font-semibold text-[10px] cursor-pointer"
               >
-                Retry
+                Retry image
               </button>
             </div>
           ) : (
             <img
-              src={imageSrc || ''}
+              src={imageSrc}
               alt="Pasted canvas content"
               className="w-full h-full object-cover select-none pointer-events-none"
               referrerPolicy="no-referrer"
+              onError={handleRenderedImageError}
             />
           )}
           
@@ -268,7 +297,7 @@ export default function ImageComponent({
           )}
           
           {/* Quick full-screen preview button on hover */}
-          {!isCropping && (
+          {!isCropping && imageSrc && !assetError && !renderError && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -446,10 +475,11 @@ export default function ImageComponent({
               <X className="w-6 h-6" />
             </button>
             <img
-              src={element.src}
+              src={imageSrc || ''}
               alt="Full Resolution"
               className="max-w-full max-h-[80vh] rounded-lg shadow-2xl object-contain bg-neutral-900 border border-neutral-800"
               onClick={(e) => e.stopPropagation()} // prevent closing on image click
+              onError={handleRenderedImageError}
             />
           </div>
         </div>

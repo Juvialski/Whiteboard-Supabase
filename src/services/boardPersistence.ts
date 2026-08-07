@@ -490,6 +490,9 @@ export function sanitizeElementForStorage(element: BoardElement): BoardElement {
       throw new Error('Table dimensions or data are invalid.');
     }
   }
+  if (clean.type === 'image' && !clean.assetId && typeof clean.src === 'string' && clean.src.startsWith('blob:')) {
+    throw new Error('Temporary image blob URLs cannot be persisted. Save the image as a board asset first.');
+  }
   if (clean.assetId) {
     delete clean.src;
     delete clean.audioUrl;

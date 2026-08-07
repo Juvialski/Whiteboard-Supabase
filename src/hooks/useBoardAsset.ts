@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   getBoardAsset,
+  invalidateBoardAsset,
   releaseBoardAsset,
   retainBoardAsset,
   type BoardAssetDoc,
@@ -22,26 +23,35 @@ export function useBoardAsset(
   assetId?: string,
   fallbackInlineData?: string
 ): UseBoardAssetResult {
-  const [data, setData] = useState<string | null>(fallbackInlineData || null);
-  const [loading, setLoading] = useState<boolean>(Boolean(boardId && assetId && !fallbackInlineData));
+  // blob: and previously signed remote URLs are session-scoped fallbacks. If a
+  // durable assetId exists, only a self-contained data: URL is safe to use as
+  // a fallback after a reload. This prevents stale blob URLs from masking a
+  // real Storage error and rendering only the <img> alt text.
+  const safeFallback = assetId
+    ? (fallbackInlineData?.startsWith('data:') ? fallbackInlineData : undefined)
+    : fallbackInlineData;
+
+  const [data, setData] = useState<string | null>(safeFallback || null);
+  const [loading, setLoading] = useState<boolean>(Boolean(boardId && assetId && !safeFallback));
   const [error, setError] = useState<Error | null>(null);
   const [reloadToken, setReloadToken] = useState<number>(0);
 
   const retry = useCallback(() => {
+    if (boardId && assetId) invalidateBoardAsset(boardId, assetId);
     setReloadToken((prev) => prev + 1);
-  }, []);
+  }, [boardId, assetId]);
 
   useEffect(() => {
     // Use temporary inline data only while a Storage asset has not been created yet.
-    if (fallbackInlineData && !assetId) {
-      setData(fallbackInlineData);
+    if (safeFallback && !assetId) {
+      setData(safeFallback);
       setLoading(false);
       setError(null);
       return;
     }
 
     if (!boardId || !assetId) {
-      setData(fallbackInlineData || null);
+      setData(safeFallback || null);
       setLoading(false);
       setError(null);
       return;
@@ -52,7 +62,7 @@ export function useBoardAsset(
     // Never leave a previously resolved private asset visible while a different
     // board/account asset is loading. The old retained URL is released by the
     // previous effect cleanup before this effect runs.
-    setData(fallbackInlineData || null);
+    setData(safeFallback || null);
     setLoading(true);
     setError(null);
 
@@ -64,8 +74,8 @@ export function useBoardAsset(
           retained = true;
           setData(assetDoc.data);
           setError(null);
-        } else if (fallbackInlineData) {
-          setData(fallbackInlineData);
+        } else if (safeFallback) {
+          setData(safeFallback);
           setError(null);
         } else {
           setError(new Error(`Asset ${assetId} not found`));
@@ -73,8 +83,8 @@ export function useBoardAsset(
       })
       .catch((err) => {
         if (!isMounted) return;
-        if (fallbackInlineData) {
-          setData(fallbackInlineData);
+        if (safeFallback) {
+          setData(safeFallback);
           setError(null);
         } else {
           setError(err instanceof Error ? err : new Error(String(err)));
@@ -90,7 +100,7 @@ export function useBoardAsset(
       isMounted = false;
       if (retained) releaseBoardAsset(boardId, assetId);
     };
-  }, [boardId, assetId, fallbackInlineData, reloadToken]);
+  }, [boardId, assetId, safeFallback, reloadToken]);
 
   return { data, loading, error, retry };
 }
