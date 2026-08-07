@@ -14,6 +14,7 @@ const expected = [
   '202608060001_fix_share_link_pgcrypto.sql',
   '202608060002_fix_apply_board_mutations_jsonb_count.sql',
   '202608060003_fix_board_asset_upload.sql',
+  '202608070001_add_individual_member_view_only.sql',
 ];
 
 const failures = [];

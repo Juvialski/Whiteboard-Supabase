@@ -7,8 +7,10 @@ Render disk, or paid monitoring.
 ## Existing upgraded project
 
 The current production project has already received the security migration and
-follow-up SQL repairs. Do not rerun old standalone migration files. This source
-follow-up requires only an application build/deploy.
+follow-up SQL repairs. Do not rerun old standalone migration files. For the
+individual per-user View Only control, apply only the new migration
+`supabase/migrations/202608070001_add_individual_member_view_only.sql`, then
+deploy the application build.
 
 ## Brand-new Supabase project
 

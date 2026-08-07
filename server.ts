@@ -42,11 +42,13 @@ const SHAPES = new Set([
   "hexagon", "ribbon", "heart", "shield", "crest",
 ]);
 const BOARD_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
+const USER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "ping"]);
 const WRITER_EVENTS = new Set([
   ...VIEWER_EVENTS,
   "drawing_stream", "drawing_stream_end", "element_update", "timer_sync",
   "request_follow", "stop_follow", "board_manifest_changed", "board_settings_changed",
+  "member_permission_changed",
 ]);
 const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus"]);
 const MAX_ROOM_CLIENTS = 20;
@@ -365,7 +367,8 @@ function consumeSocketRate(context: SocketContext, type: string): boolean {
   const limits: Record<string, number> = {
     cursor: 300, laser_point: 600, drawing_stream: 300, element_focus: 30,
     element_update: 120, drawing_stream_end: 60, board_manifest_changed: 12,
-    timer_sync: 15, request_follow: 10, stop_follow: 10, board_settings_changed: 6, ping: 10,
+    timer_sync: 15, request_follow: 10, stop_follow: 10, board_settings_changed: 6,
+    member_permission_changed: 20, ping: 10,
   };
   const max = limits[type] ?? 30;
   const now = Date.now();
@@ -383,7 +386,7 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
 
   const allowed = context.canWrite ? WRITER_EVENTS : VIEWER_EVENTS;
   if (!allowed.has(type)) return null;
-  if ((type === "request_follow" || type === "stop_follow" || type === "board_settings_changed") && !context.canManage) return null;
+  if ((type === "request_follow" || type === "stop_follow" || type === "board_settings_changed" || type === "member_permission_changed") && !context.canManage) return null;
   const common = { type, boardId: context.boardId, userId: context.userId, lastActive: Date.now() };
 
   switch (type) {
@@ -428,6 +431,11 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
         studentsCanWrite: message.studentsCanWrite,
         updatedAt: isFiniteNumber(message.updatedAt, 0, Number.MAX_SAFE_INTEGER) ? message.updatedAt : Date.now(),
       };
+    case "member_permission_changed": {
+      const targetUserId = cleanText(message.targetUserId, 64);
+      if (!USER_ID_PATTERN.test(targetUserId)) return null;
+      return { ...common, targetUserId };
+    }
     case "board_manifest_changed": {
       if (!isFiniteNumber(message.revision, 0, Number.MAX_SAFE_INTEGER)) return null;
       const normalizeShardIds = (value: unknown): string[] | null => {
@@ -671,6 +679,24 @@ function configureWebSockets(): void {
                 await refreshSocketAuthorization(client, peerContext, 0);
               } catch (error) {
                 console.error("Peer authorization refresh failed:", safeErrorLabel(error));
+                closePolicy(client, "Authorization refresh failed");
+              }
+            }));
+          }
+
+          if (payload.type === "member_permission_changed") {
+            // The manager has already committed the membership role through the
+            // security-definer RPC. Refresh only that user's live sockets so the
+            // write gate changes immediately without adding recurring DB reads.
+            const targetUserId = String(payload.targetUserId || "");
+            await Promise.all(Array.from(clients).map(async (client) => {
+              if (client === ws || client.readyState !== WebSocket.OPEN) return;
+              const peerContext = socketContexts.get(client);
+              if (!peerContext?.authenticated || peerContext.userId !== targetUserId) return;
+              try {
+                await refreshSocketAuthorization(client, peerContext, 0);
+              } catch (error) {
+                console.error("Member authorization refresh failed:", safeErrorLabel(error));
                 closePolicy(client, "Authorization refresh failed");
               }
             }));

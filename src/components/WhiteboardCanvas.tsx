@@ -20,6 +20,12 @@ import {
 } from "../services/boardSocketService";
 import { createSecureBoardShareLink } from "../services/shareLinkService";
 import {
+  listBoardMembers,
+  updateBoardMemberRole,
+  type BoardMember,
+  type BoardMemberRole,
+} from "../services/boardMemberService";
+import {
   BoardElement,
   Point,
   UserProfile,
@@ -364,6 +370,8 @@ export default function WhiteboardCanvas({
   const [wsConnected, setWsConnected] = useState(false);
   const [activeCollaboratorIds, setActiveCollaboratorIds] = useState<string[]>([]);
   const socketCollaboratorsRef = useRef<Record<string, Collaborator>>({});
+  const [boardMembers, setBoardMembers] = useState<BoardMember[]>([]);
+  const [isBoardMembersLoading, setIsBoardMembersLoading] = useState(false);
   const remoteDrawingStreamsRef = useRef<Record<string, {
     points: Point[];
     color: string;
@@ -966,6 +974,68 @@ export default function WhiteboardCanvas({
   const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
   const isTeacher = canManage;
   canManageRef.current = canManage;
+
+  const refreshBoardMembers = React.useCallback(async () => {
+    if (!canManage || isSandboxEnvironment()) {
+      setBoardMembers([]);
+      return;
+    }
+
+    setIsBoardMembersLoading(true);
+    try {
+      setBoardMembers(await listBoardMembers(boardId));
+    } catch (error) {
+      console.error("Unable to load board members:", error);
+      showSyncToast(
+        error instanceof Error ? error.message : "Unable to load board members.",
+        "error",
+        7000,
+      );
+    } finally {
+      setIsBoardMembersLoading(false);
+    }
+  }, [boardId, canManage, showSyncToast]);
+
+  const handleSetBoardMemberRole = React.useCallback(async (
+    userId: string,
+    role: BoardMemberRole,
+  ) => {
+    if (!canManage || isSandboxEnvironment()) return;
+
+    const member = boardMembers.find((entry) => entry.userId === userId);
+    try {
+      await updateBoardMemberRole(boardId, userId, role);
+      setBoardMembers((previous) => previous.map((entry) => (
+        entry.userId === userId ? { ...entry, role } : entry
+      )));
+
+      // The database is authoritative. This message only asks the relay to
+      // refresh the changed user's live authorization immediately.
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "member_permission_changed",
+          targetUserId: userId,
+        }));
+      }
+
+      const name = member?.displayName || "Student";
+      if (role === "viewer") {
+        showSyncToast(`${name} is now view only.`, "warning");
+      } else if (studentsCanWrite) {
+        showSyncToast(`${name} can edit this board again.`, "success");
+      } else {
+        showSyncToast(`${name} is set as an editor, but the global student lock is still on.`, "info", 6500);
+      }
+    } catch (error) {
+      console.error("Unable to update individual member access:", error);
+      showSyncToast(
+        error instanceof Error ? error.message : "Unable to update individual member access.",
+        "error",
+        8000,
+      );
+      throw error;
+    }
+  }, [boardId, boardMembers, canManage, showSyncToast, studentsCanWrite]);
 
   useEffect(() => {
     if (!canManage && isPresenterMode) {
@@ -3520,6 +3590,10 @@ export default function WhiteboardCanvas({
         canManage={canManage}
         studentsCanWrite={displayedStudentsCanWrite}
         handleToggleStudentsCanWrite={handleToggleStudentsCanWrite}
+        boardMembers={boardMembers}
+        isBoardMembersLoading={isBoardMembersLoading}
+        onRefreshBoardMembers={refreshBoardMembers}
+        onSetBoardMemberRole={handleSetBoardMemberRole}
         isPdfBoard={isPdfBoard}
         handleDownloadPdfWithDrawings={handleDownloadPdfWithDrawings}
         isGeneratingPdf={isGeneratingPdf}
