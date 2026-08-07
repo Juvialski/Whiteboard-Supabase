@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ImageElement, UserProfile } from '../types';
 import { Smile, Trash2, Maximize2, X, Crop, Check, Lock, Unlock, Loader2, AlertCircle } from 'lucide-react';
 import { useBoardAsset } from '../hooks/useBoardAsset';
-import { getBoardAssetSignedUrl, saveBoardAsset } from '../services/storageService';
+import { saveBoardAsset } from '../services/storageService';
 import { isSandboxEnvironment } from '../utils/sandboxGuard';
 
 interface ImageComponentProps {
@@ -44,62 +44,6 @@ export default function ImageComponent({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCropping, setIsCropping] = useState(false);
   const [crop, setCrop] = useState({ top: 0, left: 0, right: 0, bottom: 0 });
-  const [renderError, setRenderError] = useState(false);
-  const [directImageSrc, setDirectImageSrc] = useState<string | null>(null);
-  const [directLoading, setDirectLoading] = useState(false);
-  const [directError, setDirectError] = useState<string | null>(null);
-  const [directAttempted, setDirectAttempted] = useState(false);
-
-  const resolvedImageSrc = directImageSrc || imageSrc;
-  const missingPersistentReference = !element.assetId && !element.src;
-  const expiredLegacyBlobReference = !element.assetId && Boolean(element.src?.startsWith('blob:'));
-
-  useEffect(() => {
-    if (!directImageSrc) setRenderError(false);
-  }, [imageSrc, directImageSrc]);
-
-  useEffect(() => {
-    setRenderError(false);
-    setDirectImageSrc(null);
-    setDirectLoading(false);
-    setDirectError(null);
-    setDirectAttempted(false);
-  }, [element.assetId, boardId]);
-
-  // If the normal authenticated download path itself fails, try the same
-  // private Storage object through a short-lived signed URL. This distinguishes
-  // local Blob/cache problems from a genuinely missing/corrupt Storage object.
-  useEffect(() => {
-    if (!assetError || !boardId || !element.assetId || directAttempted) return;
-    let cancelled = false;
-    setDirectAttempted(true);
-    setDirectLoading(true);
-    setDirectError(null);
-
-    getBoardAssetSignedUrl(boardId, element.assetId)
-      .then((url) => {
-        if (cancelled) return;
-        if (url) {
-          setDirectImageSrc(url);
-          setRenderError(false);
-        } else {
-          setDirectError('No Storage object was found for this saved image.');
-          setRenderError(true);
-        }
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setDirectError(error instanceof Error ? error.message : String(error));
-        setRenderError(true);
-      })
-      .finally(() => {
-        if (!cancelled) setDirectLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [assetError, boardId, element.assetId]);
 
   useEffect(() => {
     if (!canWrite) {
@@ -169,7 +113,7 @@ export default function ImageComponent({
   const handleConfirmCrop = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setCropError(null);
-    if (!resolvedImageSrc) return;
+    if (!imageSrc) return;
 
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -235,56 +179,7 @@ export default function ImageComponent({
     img.onerror = () => {
       setCropError("Image loading failed during crop.");
     };
-    img.src = resolvedImageSrc;
-  };
-
-  const tryDirectStorageImage = async () => {
-    if (!boardId || !element.assetId || directAttempted) return false;
-    setDirectAttempted(true);
-    setDirectLoading(true);
-    setDirectError(null);
-    try {
-      const url = await getBoardAssetSignedUrl(boardId, element.assetId);
-      if (!url) {
-        setDirectError('No Storage object was found for this saved image.');
-        setRenderError(true);
-        return false;
-      }
-      setDirectImageSrc(url);
-      setRenderError(false);
-      return true;
-    } catch (error) {
-      setDirectError(error instanceof Error ? error.message : String(error));
-      setRenderError(true);
-      return false;
-    } finally {
-      setDirectLoading(false);
-    }
-  };
-
-  const handleRenderedImageError = () => {
-    // A Blob URL can fail because of browser/cache lifecycle even when the
-    // private Storage object is healthy. Bypass Blob handling once before
-    // declaring the saved file unusable.
-    if (!directImageSrc && element.assetId && !directAttempted) {
-      setRenderError(false);
-      void tryDirectStorageImage();
-      return;
-    }
-
-    setDirectError((current) => current || (directImageSrc
-      ? 'The Storage file exists, but the browser still cannot decode it as an image.'
-      : 'The downloaded image could not be decoded by the browser.'));
-    setRenderError(true);
-  };
-
-  const handleManualImageRetry = (e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    setRenderError(false);
-    setDirectImageSrc(null);
-    setDirectError(null);
-    setDirectAttempted(false);
-    retryAsset();
+    img.src = imageSrc;
   };
 
   const cursorClass = element.locked 
@@ -315,36 +210,27 @@ export default function ImageComponent({
       >
         {/* Image Content Frame */}
         <div className="w-full h-full relative rounded-xs overflow-hidden flex items-center justify-center group/img">
-          {(isAssetLoading || directLoading) && !resolvedImageSrc ? (
+          {isAssetLoading ? (
             <div className="w-full h-full bg-slate-100 animate-pulse flex items-center justify-center text-slate-400 text-xs gap-1.5 p-2">
               <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
               <span>Loading asset...</span>
             </div>
-          ) : renderError || (!resolvedImageSrc && (assetError || directError)) || !resolvedImageSrc ? (
+          ) : assetError && !imageSrc ? (
             <div className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center">
-              <AlertCircle className="w-4 h-4" />
-              <span className="font-semibold">Image unavailable</span>
-              <span className="text-[10px] text-rose-500 max-w-[92%] break-words">
-                {(directError || assetError?.message || (missingPersistentReference
-                  ? 'This older image lost its saved Storage reference. The board is checking for a recoverable orphaned image.'
-                  : expiredLegacyBlobReference
-                    ? 'This older image only has an expired temporary browser URL and no saved asset reference.'
-                    : 'The saved image could not be decoded.')).slice(0, 180)}
-              </span>
+              <span>Asset load failed</span>
               <button
-                onClick={handleManualImageRetry}
+                onClick={retryAsset}
                 className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 rounded font-semibold text-[10px] cursor-pointer"
               >
-                Retry image
+                Retry
               </button>
             </div>
           ) : (
             <img
-              src={resolvedImageSrc}
+              src={imageSrc || ''}
               alt="Pasted canvas content"
               className="w-full h-full object-cover select-none pointer-events-none"
               referrerPolicy="no-referrer"
-              onError={handleRenderedImageError}
             />
           )}
           
@@ -382,7 +268,7 @@ export default function ImageComponent({
           )}
           
           {/* Quick full-screen preview button on hover */}
-          {!isCropping && resolvedImageSrc && !renderError && (
+          {!isCropping && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -560,11 +446,10 @@ export default function ImageComponent({
               <X className="w-6 h-6" />
             </button>
             <img
-              src={resolvedImageSrc || ''}
+              src={element.src}
               alt="Full Resolution"
               className="max-w-full max-h-[80vh] rounded-lg shadow-2xl object-contain bg-neutral-900 border border-neutral-800"
               onClick={(e) => e.stopPropagation()} // prevent closing on image click
-              onError={handleRenderedImageError}
             />
           </div>
         </div>

@@ -304,11 +304,20 @@ function containsForbiddenObjectKey(value: unknown, depth = 0): boolean {
   }
   return false;
 }
-function relayElementDataValid(value: unknown, elementId: string): boolean {
+function relayElementDataValid(value: unknown, elementId: string, isMerge: boolean): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const data = value as Record<string, unknown>;
   const allowedTypes = new Set(["sticky", "shape", "text", "drawing", "image", "connector", "audio", "stamp", "math", "table"]);
-  if (data.id !== elementId || typeof data.type !== "string" || !allowedTypes.has(data.type)) return false;
+
+  // Working collaboration builds allowed compact merge patches. Requiring every
+  // realtime edit to contain a complete element silently dropped text/style
+  // updates and made collaborators wait for the next database checkpoint.
+  if (data.id !== undefined && data.id !== elementId) return false;
+  if (!isMerge) {
+    if (typeof data.type !== "string" || !allowedTypes.has(data.type)) return false;
+  } else if (data.type !== undefined && (typeof data.type !== "string" || !allowedTypes.has(data.type))) {
+    return false;
+  }
 
   for (const field of ["x", "y", "width", "height", "zIndex", "fontSize", "duration", "strokeWidth"]) {
     if (data[field] !== undefined && !isFiniteNumber(data[field])) return false;
@@ -319,13 +328,13 @@ function relayElementDataValid(value: unknown, elementId: string): boolean {
   if (typeof data.text === "string" && data.text.length > 100_000) return false;
   if (typeof data.label === "string" && data.label.length > 10_000) return false;
 
-  if (data.type === "drawing") {
-    if (!pointsValid(data.points, 3_000) || !isFiniteNumber(data.width, 0.1, 200)) return false;
-  }
-  if (data.type === "table") {
-    if (typeof data.rows !== "number" || !Number.isInteger(data.rows) || !isFiniteNumber(data.rows, 1, 200) ||
-        typeof data.cols !== "number" || !Number.isInteger(data.cols) || !isFiniteNumber(data.cols, 1, 200) ||
-        !Array.isArray(data.data) || data.data.length > 200 ||
+  if (data.points !== undefined && !pointsValid(data.points, 3_000)) return false;
+  if (data.type === "drawing" && data.width !== undefined && !isFiniteNumber(data.width, 0.1, 200)) return false;
+
+  if (data.rows !== undefined && (typeof data.rows !== "number" || !Number.isInteger(data.rows) || !isFiniteNumber(data.rows, 1, 200))) return false;
+  if (data.cols !== undefined && (typeof data.cols !== "number" || !Number.isInteger(data.cols) || !isFiniteNumber(data.cols, 1, 200))) return false;
+  if (data.data !== undefined) {
+    if (!Array.isArray(data.data) || data.data.length > 200 ||
         !data.data.every((row) => Array.isArray(row) && row.length <= 200 && row.every((cell) => typeof cell === "string" && cell.length <= 100_000))) {
       return false;
     }
@@ -409,7 +418,7 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
       if (!new Set(["set", "delete"]).has(message.actionType)) return null;
       if (message.actionType !== "delete" && (!message.elementData || typeof message.elementData !== "object" || Array.isArray(message.elementData))) return null;
       if (payloadSize(message.elementData) > 64 * 1024 || containsForbiddenObjectKey(message.elementData)) return null;
-      if (message.actionType !== "delete" && !relayElementDataValid(message.elementData, message.elementId)) return null;
+      if (message.actionType !== "delete" && !relayElementDataValid(message.elementData, message.elementId, message.isMerge === true)) return null;
       return { ...common, elementId: message.elementId, elementData: message.actionType === "delete" ? undefined : message.elementData, actionType: message.actionType, isMerge: message.isMerge === true };
     }
     case "timer_sync": {

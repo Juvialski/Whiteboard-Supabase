@@ -6,7 +6,7 @@ export interface BoardAssetDoc {
   assetId: string;
   encoding: 'url' | 'base64';
   mimeType: string;
-  /** Object URL for cached Storage blobs, or a data URL in sandbox/fallback mode. */
+  /** Self-contained data URL used only for in-memory rendering/cache. */
   data: string;
   encodedByteSize: number;
   originalByteSize?: number;
@@ -16,15 +16,6 @@ export interface BoardAssetDoc {
   createdAt: number;
   createdBy?: string;
   objectPath?: string;
-}
-
-
-export interface BoardImageAssetMeta {
-  assetId: string;
-  mimeType: string;
-  createdAt: number;
-  objectPath: string;
-  originalByteSize?: number;
 }
 
 export interface SavedAssetMeta {
@@ -52,8 +43,6 @@ const inFlightAssetRequests = new Map<string, Promise<BoardAssetDoc | null>>();
 let totalAssetCacheBytes = 0;
 let assetCacheEpoch = 0;
 const boardCacheEpochs = new Map<string, number>();
-const boardImageAssetIndexCache = new Map<string, { fetchedAt: number; assets: BoardImageAssetMeta[] }>();
-const BOARD_IMAGE_ASSET_INDEX_TTL_MS = 30_000;
 
 export const MAX_ASSET_DOCUMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_SAFE_ASSET_BYTES = MAX_ASSET_DOCUMENT_BYTES;
@@ -85,10 +74,6 @@ function hashCacheKey(boardId: string, contentHash: string, userScope = currentA
 
 function boardEpoch(boardId: string): number {
   return boardCacheEpochs.get(boardId) || 0;
-}
-
-function canUseObjectUrls(): boolean {
-  return typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
 }
 
 function revokeEntry(entry: CachedAssetEntry): void {
@@ -127,8 +112,8 @@ function cacheAsset(
   const key = cacheKeyFor(boardId, document.assetId);
   const existing = assetCacheMap.get(key);
   if (existing?.retainCount) {
-    // Asset IDs are content-addressed and immutable. Keep the URL already in use
-    // by mounted React components instead of revoking it underneath them.
+    // Asset IDs are content-addressed and immutable. Keep the source already in use
+    // by mounted React components instead of replacing it underneath them.
     if (revocable && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
       URL.revokeObjectURL(document.data);
     }
@@ -159,7 +144,7 @@ function getCachedAsset(boardId: string, assetId: string): BoardAssetDoc | null 
   return entry.document;
 }
 
-/** Prevents an object URL currently rendered by React from being evicted. */
+/** Prevents a currently rendered cached asset from being evicted. */
 export function retainBoardAsset(boardId: string, assetId: string): void {
   const entry = assetCacheMap.get(cacheKeyFor(boardId, assetId));
   if (!entry) return;
@@ -167,29 +152,13 @@ export function retainBoardAsset(boardId: string, assetId: string): void {
   entry.lastAccessedAt = Date.now();
 }
 
-/** Releases a previously retained object URL and runs bounded LRU eviction. */
+/** Releases a previously retained cached asset and runs bounded LRU eviction. */
 export function releaseBoardAsset(boardId: string, assetId: string): void {
   const entry = assetCacheMap.get(cacheKeyFor(boardId, assetId));
   if (!entry) return;
   entry.retainCount = Math.max(0, entry.retainCount - 1);
   entry.lastAccessedAt = Date.now();
   evictUnretainedAssets();
-}
-
-/**
- * Invalidates one cached asset so the next read is forced back to Storage.
- * This is used when the browser reports that an object URL can no longer be
- * decoded (for example after a revoked/stale blob URL).
- */
-export function invalidateBoardAsset(boardId: string, assetId: string): void {
-  if (!boardId || !assetId) return;
-  const key = cacheKeyFor(boardId, assetId);
-  const cached = assetCacheMap.get(key);
-  if (cached?.document.contentHash) {
-    hashToAssetIdMap.delete(hashCacheKey(boardId, cached.document.contentHash));
-  }
-  removeCacheEntry(key);
-  inFlightAssetRequests.delete(key);
 }
 
 export async function computeSHA256Hash(data: string): Promise<string> {
@@ -305,20 +274,6 @@ function startsWithBytes(bytes: Uint8Array, signature: number[], offset = 0): bo
   return signature.every((value, index) => bytes[offset + index] === value);
 }
 
-function detectAssetMime(bytes: Uint8Array): string | null {
-  const ascii = new TextDecoder('ascii').decode(bytes);
-  if (startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
-  if (startsWithBytes(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
-  if (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a')) return 'image/gif';
-  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') return 'image/webp';
-  if (ascii.startsWith('%PDF-')) return 'application/pdf';
-  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WAVE') return 'audio/wav';
-  if (ascii.startsWith('OggS')) return 'audio/ogg';
-  if (startsWithBytes(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return 'audio/webm';
-  if (ascii.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
-  return null;
-}
-
 async function assertBlobMatchesMime(blob: Blob, mimeType: string): Promise<void> {
   const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
   const ascii = new TextDecoder('ascii').decode(bytes);
@@ -359,38 +314,24 @@ async function assertBlobMatchesMime(blob: Blob, mimeType: string): Promise<void
   if (!valid) throw new Error(`The file contents do not match ${mimeType}.`);
 }
 
-function createCachedSource(blob: Blob, fallbackDataUrl?: string): {
+function createCachedSource(_blob: Blob, fallbackDataUrl?: string): {
   data: string;
   encoding: 'url' | 'base64';
   revocable: boolean;
 } {
-  // Images used to render reliably as data URLs in this app. A later object-URL
-  // cache refactor made Storage-backed images depend on browser blob URL
-  // lifecycle/CSP behavior and caused both newly pasted and reloaded images to
-  // fail in some production browsers. Prefer a self-contained data URL whenever
-  // one is already available; the bounded LRU still limits memory use and the
-  // value never gets written back into board shards.
-  if (fallbackDataUrl?.startsWith('data:image/')) {
-    return { data: fallbackDataUrl, encoding: 'base64', revocable: false };
-  }
-  if (canUseObjectUrls()) {
-    return { data: URL.createObjectURL(blob), encoding: 'url', revocable: true };
-  }
+  // Restore the proven pre-regression behavior: Storage remains the durable
+  // source of truth, but downloaded media is rendered from a self-contained
+  // data URL. This avoids object-URL lifetime/revocation issues that caused
+  // freshly pasted and reloaded images to become undecodable in production.
   if (fallbackDataUrl) return { data: fallbackDataUrl, encoding: 'base64', revocable: false };
-  throw new Error('This browser cannot create a local media URL.');
+  throw new Error('Unable to create a self-contained media source.');
 }
 
-async function blobToDataUrl(blob: Blob): Promise<string | undefined> {
-  if (!blob.type.toLowerCase().startsWith('image/')) return undefined;
-  if (typeof FileReader === 'undefined') return undefined;
+function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      const value = typeof reader.result === 'string' ? reader.result : '';
-      if (value.startsWith('data:image/')) resolve(value);
-      else reject(new Error('The downloaded image could not be converted for display.'));
-    };
-    reader.onerror = () => reject(reader.error || new Error('Unable to read the downloaded image.'));
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Unable to read downloaded asset.'));
     reader.readAsDataURL(blob);
   });
 }
@@ -414,55 +355,6 @@ function metadataToAssetDoc(
     createdBy: row.created_by || undefined,
     objectPath: row.object_path,
   };
-}
-
-async function normalizeDownloadedAssetBlob(blob: Blob, expectedMimeType: string): Promise<Blob> {
-  if (!blob || blob.size <= 0) {
-    throw new Error('Storage returned an empty asset.');
-  }
-
-  const normalizedMime = (expectedMimeType || blob.type || '').toLowerCase().split(';')[0].trim();
-  let candidate = normalizedMime && blob.type !== normalizedMime
-    ? blob.slice(0, blob.size, normalizedMime)
-    : blob;
-
-  if (!ALLOWED_ASSET_MIME_TYPES.has(normalizedMime)) return candidate;
-
-  try {
-    await assertBlobMatchesMime(candidate, normalizedMime);
-    return candidate;
-  } catch (signatureError) {
-    // Older rows may have incorrect MIME metadata even though the object bytes
-    // are still healthy. Detect the actual supported type before giving up.
-    const header = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
-    const detectedMime = detectAssetMime(header);
-    if (detectedMime && ALLOWED_ASSET_MIME_TYPES.has(detectedMime)) {
-      const recovered = blob.slice(0, blob.size, detectedMime);
-      await assertBlobMatchesMime(recovered, detectedMime);
-      return recovered;
-    }
-
-    // A few legacy deployments accidentally stored the complete data URL as
-    // text instead of the decoded media bytes. Recover those objects in-memory
-    // so old boards can still render without rewriting board data.
-    if (blob.size <= MAX_SAFE_ASSET_BYTES) {
-      try {
-        const legacyText = (await blob.text()).trim();
-        if (legacyText.startsWith('data:')) {
-          const recovered = await dataUrlToBlob(legacyText);
-          const recoveredMime = (recovered.type || normalizedMime).toLowerCase().split(';')[0].trim();
-          if (ALLOWED_ASSET_MIME_TYPES.has(recoveredMime)) {
-            await assertBlobMatchesMime(recovered, recoveredMime);
-            return recovered;
-          }
-        }
-      } catch {
-        // Keep the original signature error below; it is more useful than a
-        // secondary legacy-decoding failure.
-      }
-    }
-    throw signatureError;
-  }
 }
 
 function cacheLocalBlob(
@@ -640,11 +532,8 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         .from(BUCKET)
         .download(metadata.object_path);
       if (downloadError) throw downloadError;
-      const normalizedBlob = await normalizeDownloadedAssetBlob(blob, metadata.mime_type);
-      // Render downloaded images from a self-contained data URL. This avoids the
-      // production-only object-URL failure that affected both teachers and
-      // students while keeping Storage as the durable source of truth.
-      const imageDataUrl = await blobToDataUrl(normalizedBlob);
+
+      const dataUrl = await blobToDataUrl(blob);
 
       // An account/board cache clear may have happened while Storage was
       // downloading. Never let a completed request repopulate private media
@@ -653,7 +542,7 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
         return null;
       }
 
-      const document = cacheLocalBlob(boardId, metadata, normalizedBlob, imageDataUrl);
+      const document = cacheLocalBlob(boardId, metadata, blob, dataUrl);
       hashToAssetIdMap.set(hashCacheKey(boardId, document.contentHash), assetId);
       trackOperation('read', 'supabase-asset-metadata-read', 1);
       trackOperation('read', 'supabase-storage-download', 1);
@@ -672,80 +561,6 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
 
   inFlightAssetRequests.set(cacheKey, request);
   return request;
-}
-
-/**
- * Lists image assets already stored for a board. Used only to repair historical
- * image elements that lost their assetId while the Storage object still exists.
- * The result is cached briefly so a board with several broken images performs a
- * single metadata query instead of one query per image.
- */
-export async function listBoardImageAssets(
-  boardId: string,
-  forceRefresh: boolean = false
-): Promise<BoardImageAssetMeta[]> {
-  if (!boardId || isSandboxEnvironment()) return [];
-  const key = `${currentAssetUserScope()}:${boardId}`;
-  const cached = boardImageAssetIndexCache.get(key);
-  if (!forceRefresh && cached && Date.now() - cached.fetchedAt < BOARD_IMAGE_ASSET_INDEX_TTL_MS) {
-    return cached.assets;
-  }
-
-  const { data, error } = await supabase
-    .from('board_assets')
-    .select('asset_id,mime_type,created_at,object_path,original_byte_size')
-    .eq('board_id', boardId)
-    .like('mime_type', 'image/%')
-    .order('created_at', { ascending: true });
-  if (error) throw new Error(`Unable to list saved board images: ${error.message}`);
-
-  const assets: BoardImageAssetMeta[] = (data || [])
-    .filter((row: any) => row?.asset_id && row?.object_path)
-    .map((row: any) => ({
-      assetId: String(row.asset_id),
-      mimeType: String(row.mime_type || 'image/png'),
-      createdAt: Number(row.created_at || 0),
-      objectPath: String(row.object_path),
-      originalByteSize: row.original_byte_size == null ? undefined : Number(row.original_byte_size),
-    }))
-    .filter((row) => Number.isFinite(row.createdAt));
-
-  boardImageAssetIndexCache.set(key, { fetchedAt: Date.now(), assets });
-  trackOperation('read', 'supabase-board-image-asset-index', 1);
-  return assets;
-}
-
-/**
- * Creates a short-lived direct Storage URL for an existing private board asset.
- * This is a rendering fallback only: the signed URL is never persisted into board
- * state. It bypasses local Blob/object-URL handling when a browser cannot render
- * an otherwise valid downloaded object.
- */
-export async function getBoardAssetSignedUrl(
-  boardId: string,
-  assetId: string,
-  expiresInSeconds: number = 10 * 60
-): Promise<string | null> {
-  if (!boardId || !assetId || isSandboxEnvironment()) return null;
-
-  const { data: metadata, error: metadataError } = await supabase
-    .from('board_assets')
-    .select('object_path')
-    .eq('board_id', boardId)
-    .eq('asset_id', assetId)
-    .maybeSingle();
-  if (metadataError) throw new Error(`Unable to read asset metadata: ${metadataError.message}`);
-  if (!metadata?.object_path) return null;
-
-  const { data, error } = await supabase.storage
-    .from(BUCKET)
-    .createSignedUrl(metadata.object_path, Math.max(60, Math.min(expiresInSeconds, 60 * 60)));
-  if (error) throw new Error(`Unable to create direct asset URL: ${error.message}`);
-  const signedUrl = data?.signedUrl?.trim();
-  if (!signedUrl) return null;
-
-  trackOperation('read', 'supabase-asset-signed-url', 1);
-  return signedUrl;
 }
 
 export async function deleteAssetFromStorage(
@@ -802,7 +617,6 @@ export function clearAssetCache(boardId?: string): void {
   if (!boardId) {
     assetCacheEpoch += 1;
     boardCacheEpochs.clear();
-    boardImageAssetIndexCache.clear();
     for (const key of Array.from(assetCacheMap.keys())) removeCacheEntry(key);
     hashToAssetIdMap.clear();
     inFlightAssetRequests.clear();
@@ -810,8 +624,6 @@ export function clearAssetCache(boardId?: string): void {
   }
 
   boardCacheEpochs.set(boardId, boardEpoch(boardId) + 1);
-  const imageIndexPrefix = `${currentAssetUserScope()}:${boardId}`;
-  boardImageAssetIndexCache.delete(imageIndexPrefix);
   for (const [key, entry] of Array.from(assetCacheMap.entries())) {
     if (entry.boardId === boardId) removeCacheEntry(key);
   }
