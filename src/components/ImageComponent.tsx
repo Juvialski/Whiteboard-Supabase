@@ -51,6 +51,8 @@ export default function ImageComponent({
   const [directAttempted, setDirectAttempted] = useState(false);
 
   const resolvedImageSrc = directImageSrc || imageSrc;
+  const missingPersistentReference = !element.assetId && !element.src;
+  const expiredLegacyBlobReference = !element.assetId && Boolean(element.src?.startsWith('blob:'));
 
   useEffect(() => {
     if (!directImageSrc) setRenderError(false);
@@ -323,7 +325,11 @@ export default function ImageComponent({
               <AlertCircle className="w-4 h-4" />
               <span className="font-semibold">Image unavailable</span>
               <span className="text-[10px] text-rose-500 max-w-[92%] break-words">
-                {(directError || assetError?.message || 'The saved image could not be decoded.').slice(0, 180)}
+                {(directError || assetError?.message || (missingPersistentReference
+                  ? 'This older image lost its saved Storage reference. The board is checking for a recoverable orphaned image.'
+                  : expiredLegacyBlobReference
+                    ? 'This older image only has an expired temporary browser URL and no saved asset reference.'
+                    : 'The saved image could not be decoded.')).slice(0, 180)}
               </span>
               <button
                 onClick={handleManualImageRetry}

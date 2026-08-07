@@ -18,6 +18,15 @@ export interface BoardAssetDoc {
   objectPath?: string;
 }
 
+
+export interface BoardImageAssetMeta {
+  assetId: string;
+  mimeType: string;
+  createdAt: number;
+  objectPath: string;
+  originalByteSize?: number;
+}
+
 export interface SavedAssetMeta {
   assetId: string;
   mimeType: string;
@@ -43,6 +52,8 @@ const inFlightAssetRequests = new Map<string, Promise<BoardAssetDoc | null>>();
 let totalAssetCacheBytes = 0;
 let assetCacheEpoch = 0;
 const boardCacheEpochs = new Map<string, number>();
+const boardImageAssetIndexCache = new Map<string, { fetchedAt: number; assets: BoardImageAssetMeta[] }>();
+const BOARD_IMAGE_ASSET_INDEX_TTL_MS = 30_000;
 
 export const MAX_ASSET_DOCUMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_SAFE_ASSET_BYTES = MAX_ASSET_DOCUMENT_BYTES;
@@ -636,6 +647,47 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
 }
 
 /**
+ * Lists image assets already stored for a board. Used only to repair historical
+ * image elements that lost their assetId while the Storage object still exists.
+ * The result is cached briefly so a board with several broken images performs a
+ * single metadata query instead of one query per image.
+ */
+export async function listBoardImageAssets(
+  boardId: string,
+  forceRefresh: boolean = false
+): Promise<BoardImageAssetMeta[]> {
+  if (!boardId || isSandboxEnvironment()) return [];
+  const key = `${currentAssetUserScope()}:${boardId}`;
+  const cached = boardImageAssetIndexCache.get(key);
+  if (!forceRefresh && cached && Date.now() - cached.fetchedAt < BOARD_IMAGE_ASSET_INDEX_TTL_MS) {
+    return cached.assets;
+  }
+
+  const { data, error } = await supabase
+    .from('board_assets')
+    .select('asset_id,mime_type,created_at,object_path,original_byte_size')
+    .eq('board_id', boardId)
+    .like('mime_type', 'image/%')
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(`Unable to list saved board images: ${error.message}`);
+
+  const assets: BoardImageAssetMeta[] = (data || [])
+    .filter((row: any) => row?.asset_id && row?.object_path)
+    .map((row: any) => ({
+      assetId: String(row.asset_id),
+      mimeType: String(row.mime_type || 'image/png'),
+      createdAt: Number(row.created_at || 0),
+      objectPath: String(row.object_path),
+      originalByteSize: row.original_byte_size == null ? undefined : Number(row.original_byte_size),
+    }))
+    .filter((row) => Number.isFinite(row.createdAt));
+
+  boardImageAssetIndexCache.set(key, { fetchedAt: Date.now(), assets });
+  trackOperation('read', 'supabase-board-image-asset-index', 1);
+  return assets;
+}
+
+/**
  * Creates a short-lived direct Storage URL for an existing private board asset.
  * This is a rendering fallback only: the signed URL is never persisted into board
  * state. It bypasses local Blob/object-URL handling when a browser cannot render
@@ -722,6 +774,7 @@ export function clearAssetCache(boardId?: string): void {
   if (!boardId) {
     assetCacheEpoch += 1;
     boardCacheEpochs.clear();
+    boardImageAssetIndexCache.clear();
     for (const key of Array.from(assetCacheMap.keys())) removeCacheEntry(key);
     hashToAssetIdMap.clear();
     inFlightAssetRequests.clear();
@@ -729,6 +782,8 @@ export function clearAssetCache(boardId?: string): void {
   }
 
   boardCacheEpochs.set(boardId, boardEpoch(boardId) + 1);
+  const imageIndexPrefix = `${currentAssetUserScope()}:${boardId}`;
+  boardImageAssetIndexCache.delete(imageIndexPrefix);
   for (const [key, entry] of Array.from(assetCacheMap.entries())) {
     if (entry.boardId === boardId) removeCacheEntry(key);
   }

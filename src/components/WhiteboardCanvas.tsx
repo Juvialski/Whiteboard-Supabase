@@ -169,6 +169,22 @@ const compressImage = (file: File): Promise<CompressedImage | null> => {
   });
 };
 
+
+const LEGACY_IMAGE_ASSET_MATCH_WINDOW_MS = 15_000;
+
+function getLegacyImageCreationTimestamp(element: ImageElement): number | null {
+  const match = /^img-(\d{13})/.exec(element.id || '');
+  if (!match) return null;
+  const timestamp = Number(match[1]);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isLegacyImageMissingAssetReference(element: BoardElement): element is ImageElement {
+  if (element.type !== 'image') return false;
+  if (element.assetId) return false;
+  return !element.src || element.src.startsWith('blob:');
+}
+
 // Helper to sanitize objects for Supabase (removes undefined fields)
 function sanitizeForSupabase(obj: any): any {
   if (obj === null || obj === undefined || typeof obj !== "object") return obj;
@@ -641,6 +657,11 @@ export default function WhiteboardCanvas({
   const hasUnsavedChanges = useRef<boolean>(false);
   const isMigratingRef = useRef<boolean>(false);
   const attemptedMigrationRef = useRef<Set<string>>(new Set());
+  const attemptedLegacyImageRecoveryRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    attemptedLegacyImageRecoveryRef.current.clear();
+  }, [boardId]);
 
   const [syncNotification, setSyncNotification] = useState<{
     message: string;
@@ -1586,6 +1607,100 @@ export default function WhiteboardCanvas({
 
     setSyncStatus('saved-local');
   }, [boardId, setElements, setSyncStatus, triggerReadOnlyAlert]);
+
+  // Historical recovery bridge: a few older board states retained the image
+  // element box but lost its assetId. The Storage object can still be present.
+  // Pasted image IDs begin with the creation timestamp, and saveBoardAsset()
+  // records its metadata milliseconds later, so a very small time-window match
+  // gives us a safe way to reconnect only high-confidence orphaned assets.
+  useEffect(() => {
+    if (!isHydrated || !canWrite || isSandboxEnvironment()) return;
+
+    const missing = elementsRef.current.filter(isLegacyImageMissingAssetReference)
+      .filter((element) => !attemptedLegacyImageRecoveryRef.current.has(element.id));
+    if (missing.length === 0) return;
+
+    missing.forEach((element) => attemptedLegacyImageRecoveryRef.current.add(element.id));
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const { getBoardAsset, listBoardImageAssets } = await import('../services/storageService');
+        const storedAssets = await listBoardImageAssets(boardId, true);
+        if (cancelled || storedAssets.length === 0) return;
+
+        const currentlyReferenced = new Set(
+          elementsRef.current
+            .filter((element): element is ImageElement => element.type === 'image' && Boolean(element.assetId))
+            .map((element) => element.assetId as string)
+        );
+        const claimedThisPass = new Set<string>();
+        let recoveredCount = 0;
+
+        const orderedMissing = [...missing].sort((a, b) => {
+          const aTime = getLegacyImageCreationTimestamp(a) || Number.MAX_SAFE_INTEGER;
+          const bTime = getLegacyImageCreationTimestamp(b) || Number.MAX_SAFE_INTEGER;
+          return aTime - bTime;
+        });
+
+        for (const element of orderedMissing) {
+          if (cancelled) return;
+          const createdAt = getLegacyImageCreationTimestamp(element);
+          if (!createdAt) continue;
+
+          const ranked = storedAssets
+            .filter((asset) =>
+              asset.mimeType.startsWith('image/') &&
+              !currentlyReferenced.has(asset.assetId) &&
+              !claimedThisPass.has(asset.assetId)
+            )
+            .map((asset) => ({ asset, delta: Math.abs(asset.createdAt - createdAt) }))
+            .filter(({ delta }) => delta <= LEGACY_IMAGE_ASSET_MATCH_WINDOW_MS)
+            .sort((a, b) => a.delta - b.delta);
+
+          if (ranked.length === 0) continue;
+          const best = ranked[0];
+          const second = ranked[1];
+          // Avoid guessing when two orphaned objects are virtually tied.
+          if (second && second.delta - best.delta < 250) continue;
+
+          let assetDoc;
+          try {
+            assetDoc = await getBoardAsset(boardId, best.asset.assetId);
+          } catch (error) {
+            console.warn(`Legacy image asset ${best.asset.assetId} failed validation.`, error);
+            continue;
+          }
+          if (!assetDoc || !assetDoc.mimeType.startsWith('image/')) continue;
+
+          const current = elementsRef.current.find((candidate) => candidate.id === element.id);
+          if (!current || !isLegacyImageMissingAssetReference(current)) continue;
+
+          await saveElementLocallyAndSync(
+            element.id,
+            { assetId: best.asset.assetId, mimeType: assetDoc.mimeType, src: undefined },
+            true
+          );
+          claimedThisPass.add(best.asset.assetId);
+          recoveredCount += 1;
+        }
+
+        if (!cancelled && recoveredCount > 0) {
+          showSyncToast(
+            `Recovered ${recoveredCount} older pasted image${recoveredCount === 1 ? '' : 's'} from Storage.`,
+            'success',
+            5000
+          );
+        }
+      } catch (error) {
+        console.warn('Legacy pasted-image recovery check failed:', error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boardId, canWrite, isHydrated, saveElementLocallyAndSync, showSyncToast]);
 
   const handleInsertBlankPdfPage = React.useCallback(() => {
     const lastPage = pdfPages[pdfPages.length - 1];
