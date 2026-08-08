@@ -63,6 +63,6 @@ describe('ElementWrapper media board context', () => {
     } as unknown as BoardElement;
 
     render(<ElementWrapper {...baseProps} el={element} />);
-    expect(screen.getByTestId(testId)).toHaveAttribute('data-board-id', 'board-media-context');
+    expect(screen.getByTestId(testId).getAttribute('data-board-id')).toBe('board-media-context');
   });
 });

@@ -63,6 +63,11 @@ describe('Modals & Workspace Utilities Test Suite', () => {
         />
       );
 
+      const openBtn = screen.queryByTitle('Open Canvas Minimap');
+      if (openBtn) {
+        fireEvent.click(openBtn);
+      }
+
       expect(screen.getByText('Canvas Overview')).toBeTruthy();
       const mapBox = container.querySelector('.cursor-crosshair');
       expect(mapBox).toBeTruthy();
