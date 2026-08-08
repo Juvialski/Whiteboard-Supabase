@@ -6,7 +6,6 @@ export interface BoardAssetDoc {
   assetId: string;
   encoding: 'url' | 'base64';
   mimeType: string;
-  /** Self-contained data URL used only for in-memory rendering/cache. */
   data: string;
   encodedByteSize: number;
   originalByteSize?: number;
@@ -26,27 +25,20 @@ export interface SavedAssetMeta {
   height?: number;
 }
 
-interface CachedAssetEntry {
-  boardId: string;
-  userScope: string;
-  document: BoardAssetDoc;
-  byteSize: number;
-  lastAccessedAt: number;
-  retainCount: number;
-  revocable: boolean;
-}
-
 const BUCKET = 'board-assets';
-const assetCacheMap = new Map<string, CachedAssetEntry>();
+const assetCacheMap = new Map<string, BoardAssetDoc>();
 const hashToAssetIdMap = new Map<string, string>();
 const inFlightAssetRequests = new Map<string, Promise<BoardAssetDoc | null>>();
-let totalAssetCacheBytes = 0;
-let assetCacheEpoch = 0;
-const boardCacheEpochs = new Map<string, number>();
 
 export const MAX_ASSET_DOCUMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_SAFE_ASSET_BYTES = MAX_ASSET_DOCUMENT_BYTES;
+// Data URLs are self-contained and never need retain/release lifecycle management.
+// Keep these exports for newer export code that was written for the short-lived
+// object-URL cache implementation.
 export const MAX_ASSET_CACHE_BYTES = 64 * 1024 * 1024;
+
+export function retainBoardAsset(_boardId: string, _assetId: string): void {}
+export function releaseBoardAsset(_boardId: string, _assetId: string): void {}
 
 const ALLOWED_ASSET_MIME_TYPES = new Set([
   'image/png',
@@ -59,107 +51,6 @@ const ALLOWED_ASSET_MIME_TYPES = new Set([
   'audio/ogg',
   'audio/webm',
 ]);
-
-function currentAssetUserScope(): string {
-  return encodeURIComponent(auth.currentUser?.uid || 'no-auth-user');
-}
-
-function cacheKeyFor(boardId: string, assetId: string, userScope = currentAssetUserScope()): string {
-  return `${userScope}:${boardId}:${assetId}`;
-}
-
-function hashCacheKey(boardId: string, contentHash: string, userScope = currentAssetUserScope()): string {
-  return `${userScope}:${boardId}:${contentHash}`;
-}
-
-function boardEpoch(boardId: string): number {
-  return boardCacheEpochs.get(boardId) || 0;
-}
-
-function revokeEntry(entry: CachedAssetEntry): void {
-  if (entry.revocable && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
-    URL.revokeObjectURL(entry.document.data);
-  }
-}
-
-function removeCacheEntry(key: string): void {
-  const existing = assetCacheMap.get(key);
-  if (!existing) return;
-  assetCacheMap.delete(key);
-  totalAssetCacheBytes = Math.max(0, totalAssetCacheBytes - existing.byteSize);
-  revokeEntry(existing);
-}
-
-function evictUnretainedAssets(protectedKey?: string): void {
-  if (totalAssetCacheBytes <= MAX_ASSET_CACHE_BYTES) return;
-
-  const candidates = Array.from(assetCacheMap.entries())
-    .filter(([key, entry]) => entry.retainCount === 0 && key !== protectedKey)
-    .sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
-
-  for (const [key] of candidates) {
-    removeCacheEntry(key);
-    if (totalAssetCacheBytes <= MAX_ASSET_CACHE_BYTES) break;
-  }
-}
-
-function cacheAsset(
-  boardId: string,
-  document: BoardAssetDoc,
-  byteSize: number,
-  revocable: boolean
-): BoardAssetDoc {
-  const key = cacheKeyFor(boardId, document.assetId);
-  const existing = assetCacheMap.get(key);
-  if (existing?.retainCount) {
-    // Asset IDs are content-addressed and immutable. Keep the source already in use
-    // by mounted React components instead of replacing it underneath them.
-    if (revocable && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
-      URL.revokeObjectURL(document.data);
-    }
-    existing.lastAccessedAt = Date.now();
-    return existing.document;
-  }
-  const retained = existing?.retainCount || 0;
-  if (existing) removeCacheEntry(key);
-
-  assetCacheMap.set(key, {
-    boardId,
-    userScope: currentAssetUserScope(),
-    document,
-    byteSize: Math.max(0, byteSize),
-    lastAccessedAt: Date.now(),
-    retainCount: retained,
-    revocable,
-  });
-  totalAssetCacheBytes += Math.max(0, byteSize);
-  evictUnretainedAssets(key);
-  return document;
-}
-
-function getCachedAsset(boardId: string, assetId: string): BoardAssetDoc | null {
-  const entry = assetCacheMap.get(cacheKeyFor(boardId, assetId));
-  if (!entry) return null;
-  entry.lastAccessedAt = Date.now();
-  return entry.document;
-}
-
-/** Prevents a currently rendered cached asset from being evicted. */
-export function retainBoardAsset(boardId: string, assetId: string): void {
-  const entry = assetCacheMap.get(cacheKeyFor(boardId, assetId));
-  if (!entry) return;
-  entry.retainCount += 1;
-  entry.lastAccessedAt = Date.now();
-}
-
-/** Releases a previously retained cached asset and runs bounded LRU eviction. */
-export function releaseBoardAsset(boardId: string, assetId: string): void {
-  const entry = assetCacheMap.get(cacheKeyFor(boardId, assetId));
-  if (!entry) return;
-  entry.retainCount = Math.max(0, entry.retainCount - 1);
-  entry.lastAccessedAt = Date.now();
-  evictUnretainedAssets();
-}
 
 export async function computeSHA256Hash(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -215,10 +106,7 @@ export async function compressImageBase64(
       context.drawImage(image, 0, 0, width, height);
       const outputType = base64DataUrl.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
       const compressed = canvas.toDataURL(outputType, quality);
-      const result = compressed.length < base64DataUrl.length ? compressed : base64DataUrl;
-      canvas.width = 1;
-      canvas.height = 1;
-      resolve(result);
+      resolve(compressed.length < base64DataUrl.length ? compressed : base64DataUrl);
     };
     image.onerror = () => resolve(base64DataUrl);
     image.src = base64DataUrl;
@@ -240,12 +128,17 @@ function extensionForMime(mimeType: string): string {
 }
 
 async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  // Do not use fetch(dataUrl) here. Production CSP intentionally limits
+  // connect-src, and browsers treat fetching a data: URL as a connection.
+  // Decode it locally instead so uploads work without weakening the CSP.
   if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
     throw new Error('The selected media file is not a valid data URL.');
   }
 
   const commaIndex = dataUrl.indexOf(',');
-  if (commaIndex < 5) throw new Error('The selected media file has an invalid data URL.');
+  if (commaIndex < 5) {
+    throw new Error('The selected media file has an invalid data URL.');
+  }
 
   const header = dataUrl.slice(5, commaIndex);
   const payload = dataUrl.slice(commaIndex + 1);
@@ -264,67 +157,11 @@ async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
       return new Blob([bytes], { type: mimeType });
     }
 
-    return new Blob([decodeURIComponent(payload)], { type: mimeType });
+    const decoded = decodeURIComponent(payload);
+    return new Blob([decoded], { type: mimeType });
   } catch {
     throw new Error('Unable to decode the selected media file.');
   }
-}
-
-function startsWithBytes(bytes: Uint8Array, signature: number[], offset = 0): boolean {
-  return signature.every((value, index) => bytes[offset + index] === value);
-}
-
-async function assertBlobMatchesMime(blob: Blob, mimeType: string): Promise<void> {
-  const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
-  const ascii = new TextDecoder('ascii').decode(bytes);
-  let valid = false;
-
-  switch (mimeType) {
-    case 'image/png':
-      valid = startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-      break;
-    case 'image/jpeg':
-      valid = startsWithBytes(bytes, [0xff, 0xd8, 0xff]);
-      break;
-    case 'image/gif':
-      valid = ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a');
-      break;
-    case 'image/webp':
-      valid = ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP';
-      break;
-    case 'application/pdf':
-      valid = ascii.startsWith('%PDF-');
-      break;
-    case 'audio/wav':
-      valid = ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WAVE';
-      break;
-    case 'audio/ogg':
-      valid = ascii.startsWith('OggS');
-      break;
-    case 'audio/webm':
-      valid = startsWithBytes(bytes, [0x1a, 0x45, 0xdf, 0xa3]);
-      break;
-    case 'audio/mpeg':
-      valid = ascii.startsWith('ID3') || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
-      break;
-    default:
-      valid = false;
-  }
-
-  if (!valid) throw new Error(`The file contents do not match ${mimeType}.`);
-}
-
-function createCachedSource(_blob: Blob, fallbackDataUrl?: string): {
-  data: string;
-  encoding: 'url' | 'base64';
-  revocable: boolean;
-} {
-  // Restore the proven pre-regression behavior: Storage remains the durable
-  // source of truth, but downloaded media is rendered from a self-contained
-  // data URL. This avoids object-URL lifetime/revocation issues that caused
-  // freshly pasted and reloaded images to become undecodable in production.
-  if (fallbackDataUrl) return { data: fallbackDataUrl, encoding: 'base64', revocable: false };
-  throw new Error('Unable to create a self-contained media source.');
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -336,17 +173,13 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-function metadataToAssetDoc(
-  row: any,
-  data: string,
-  encoding: 'url' | 'base64'
-): BoardAssetDoc {
+function metadataToAssetDoc(row: any, data: string): BoardAssetDoc {
   return {
     assetId: row.asset_id,
-    encoding,
+    encoding: 'base64',
     mimeType: row.mime_type,
     data,
-    encodedByteSize: Number(row.encoded_byte_size || row.original_byte_size || 0),
+    encodedByteSize: Number(row.encoded_byte_size || data.length),
     originalByteSize: row.original_byte_size == null ? undefined : Number(row.original_byte_size),
     width: row.width == null ? undefined : Number(row.width),
     height: row.height == null ? undefined : Number(row.height),
@@ -357,17 +190,6 @@ function metadataToAssetDoc(
   };
 }
 
-function cacheLocalBlob(
-  boardId: string,
-  row: any,
-  blob: Blob,
-  fallbackDataUrl?: string
-): BoardAssetDoc {
-  const source = createCachedSource(blob, fallbackDataUrl);
-  const document = metadataToAssetDoc(row, source.data, source.encoding);
-  return cacheAsset(boardId, document, blob.size, source.revocable);
-}
-
 export async function saveBoardAsset(
   boardId: string,
   providedAssetId: string | undefined,
@@ -376,7 +198,7 @@ export async function saveBoardAsset(
   userId?: string
 ): Promise<SavedAssetMeta> {
   let finalData = base64DataUrl;
-  if (contentType.startsWith('image/') && contentType !== 'image/gif' && contentType !== 'image/webp') {
+  if (contentType.startsWith('image/') && contentType !== 'image/gif') {
     finalData = await compressImageBase64(base64DataUrl);
   }
 
@@ -388,13 +210,12 @@ export async function saveBoardAsset(
   if (blob.size > MAX_SAFE_ASSET_BYTES) {
     throw new Error(`File is ${Math.ceil(blob.size / 1024 / 1024)} MB. The maximum asset size is 20 MB.`);
   }
-  await assertBlobMatchesMime(blob, effectiveContentType);
 
   const contentHash = await computeSHA256Hash(finalData);
-  const hashKey = hashCacheKey(boardId, contentHash);
+  const hashKey = `${boardId}:${contentHash}`;
   const cachedId = hashToAssetIdMap.get(hashKey);
   if (cachedId) {
-    const cached = getCachedAsset(boardId, cachedId);
+    const cached = assetCacheMap.get(`${boardId}:${cachedId}`);
     if (cached) {
       return {
         assetId: cached.assetId,
@@ -410,22 +231,24 @@ export async function saveBoardAsset(
   const objectPath = `boards/${boardId}/${assetId}.${extensionForMime(effectiveContentType)}`;
   const createdAt = Date.now();
   const createdBy = userId || auth.currentUser?.uid;
-  const metadataRow = {
-    board_id: boardId,
-    asset_id: assetId,
-    mime_type: effectiveContentType,
-    object_path: objectPath,
-    encoded_byte_size: finalData.length,
-    original_byte_size: blob.size,
-    width: null,
-    height: null,
-    content_hash: contentHash,
-    created_at: createdAt,
-    created_by: createdBy || null,
+
+  const assetDoc: BoardAssetDoc = {
+    assetId,
+    encoding: 'base64',
+    mimeType: effectiveContentType,
+    data: finalData,
+    encodedByteSize: finalData.length,
+    originalByteSize: blob.size,
+    contentHash,
+    createdAt,
+    createdBy,
+    objectPath,
   };
 
+  const cacheKey = `${boardId}:${assetId}`;
+
   if (isSandboxEnvironment()) {
-    cacheLocalBlob(boardId, metadataRow, blob, finalData);
+    assetCacheMap.set(cacheKey, assetDoc);
     hashToAssetIdMap.set(hashKey, assetId);
     return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   }
@@ -445,14 +268,13 @@ export async function saveBoardAsset(
     if (isDuplicateUpload) {
       const { data: existing, error: existingError } = await supabase
         .from('board_assets')
-        .select('*')
+        .select('asset_id,mime_type,encoded_byte_size,width,height')
         .eq('board_id', boardId)
         .eq('content_hash', contentHash)
         .maybeSingle();
       if (existingError) throw existingError;
       if (existing) {
         hashToAssetIdMap.set(hashKey, existing.asset_id);
-        cacheLocalBlob(boardId, existing, blob, finalData);
         trackOperation('read', 'supabase-asset-dedup-hit', 1);
         return {
           assetId: existing.asset_id,
@@ -464,23 +286,29 @@ export async function saveBoardAsset(
       }
     }
 
+    const metadataRow = {
+      board_id: boardId,
+      asset_id: assetId,
+      mime_type: effectiveContentType,
+      object_path: objectPath,
+      encoded_byte_size: finalData.length,
+      original_byte_size: blob.size,
+      width: null,
+      height: null,
+      content_hash: contentHash,
+      created_at: createdAt,
+      created_by: createdBy || null,
+    };
     const { error: metadataError } = await supabase.from('board_assets').insert(metadataRow);
     if (metadataError) {
       const { data: existing } = await supabase
         .from('board_assets')
-        .select('*')
+        .select('asset_id,mime_type,encoded_byte_size,width,height')
         .eq('board_id', boardId)
         .eq('content_hash', contentHash)
         .maybeSingle();
       if (existing) {
-        // A caller-provided asset ID can produce a different object path for
-        // content that already has metadata. Remove that just-uploaded duplicate
-        // before returning the canonical content-addressed asset.
-        if (!isDuplicateUpload && existing.object_path !== objectPath) {
-          await supabase.storage.from(BUCKET).remove([objectPath]).catch(() => undefined);
-        }
         hashToAssetIdMap.set(hashKey, existing.asset_id);
-        cacheLocalBlob(boardId, existing, blob, finalData);
         return {
           assetId: existing.asset_id,
           mimeType: existing.mime_type,
@@ -495,11 +323,11 @@ export async function saveBoardAsset(
 
     trackOperation('write', 'supabase-storage-upload', 1);
     trackOperation('write', 'supabase-asset-metadata', 1);
-    cacheLocalBlob(boardId, metadataRow, blob, finalData);
+    assetCacheMap.set(cacheKey, assetDoc);
     hashToAssetIdMap.set(hashKey, assetId);
     return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   } catch (error) {
-    removeCacheEntry(cacheKeyFor(boardId, assetId));
+    assetCacheMap.delete(cacheKey);
     hashToAssetIdMap.delete(hashKey);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to save asset: ${message}`);
@@ -507,17 +335,14 @@ export async function saveBoardAsset(
 }
 
 export async function getBoardAsset(boardId: string, assetId: string): Promise<BoardAssetDoc | null> {
-  const cacheKey = cacheKeyFor(boardId, assetId);
-  const cached = getCachedAsset(boardId, assetId);
+  const cacheKey = `${boardId}:${assetId}`;
+  const cached = assetCacheMap.get(cacheKey);
   if (cached) return cached;
   const inFlight = inFlightAssetRequests.get(cacheKey);
   if (inFlight) return inFlight;
   if (isSandboxEnvironment()) return null;
 
-  const requestEpoch = assetCacheEpoch;
-  const requestBoardEpoch = boardEpoch(boardId);
-  let request!: Promise<BoardAssetDoc | null>;
-  request = (async () => {
+  const request = (async () => {
     try {
       const { data: metadata, error: metadataError } = await supabase
         .from('board_assets')
@@ -534,28 +359,17 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
       if (downloadError) throw downloadError;
 
       const dataUrl = await blobToDataUrl(blob);
-
-      // An account/board cache clear may have happened while Storage was
-      // downloading. Never let a completed request repopulate private media
-      // into a newer identity's cache.
-      if (requestEpoch !== assetCacheEpoch || requestBoardEpoch !== boardEpoch(boardId)) {
-        return null;
-      }
-
-      const document = cacheLocalBlob(boardId, metadata, blob, dataUrl);
-      hashToAssetIdMap.set(hashCacheKey(boardId, document.contentHash), assetId);
+      const document = metadataToAssetDoc(metadata, dataUrl);
+      assetCacheMap.set(cacheKey, document);
+      hashToAssetIdMap.set(`${boardId}:${document.contentHash}`, assetId);
       trackOperation('read', 'supabase-asset-metadata-read', 1);
       trackOperation('read', 'supabase-storage-download', 1);
       return document;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Unable to load asset ${assetId}: ${message}`);
+      console.error(`Error loading asset ${assetId}:`, error);
+      return null;
     } finally {
-      // A cache clear can allow a newer request for the same asset to start while
-      // this one is still finishing. Do not delete that newer in-flight entry.
-      if (inFlightAssetRequests.get(cacheKey) === request) {
-        inFlightAssetRequests.delete(cacheKey);
-      }
+      inFlightAssetRequests.delete(cacheKey);
     }
   })();
 
@@ -571,9 +385,10 @@ export async function deleteAssetFromStorage(
   if (!assetId || isSandboxEnvironment()) return;
   if (activeElementAssetIds?.has(assetId)) return;
 
-  const cached = getCachedAsset(boardId, assetId);
-  if (cached?.contentHash) hashToAssetIdMap.delete(hashCacheKey(boardId, cached.contentHash));
-  removeCacheEntry(cacheKeyFor(boardId, assetId));
+  const cacheKey = `${boardId}:${assetId}`;
+  const cached = assetCacheMap.get(cacheKey);
+  if (cached?.contentHash) hashToAssetIdMap.delete(`${boardId}:${cached.contentHash}`);
+  assetCacheMap.delete(cacheKey);
 
   const { data: metadata, error: metadataError } = await supabase
     .from('board_assets')
@@ -615,32 +430,25 @@ export async function deleteAllBoardAssets(boardId: string): Promise<number> {
 
 export function clearAssetCache(boardId?: string): void {
   if (!boardId) {
-    assetCacheEpoch += 1;
-    boardCacheEpochs.clear();
-    for (const key of Array.from(assetCacheMap.keys())) removeCacheEntry(key);
+    assetCacheMap.clear();
     hashToAssetIdMap.clear();
     inFlightAssetRequests.clear();
     return;
   }
 
-  boardCacheEpochs.set(boardId, boardEpoch(boardId) + 1);
-  for (const [key, entry] of Array.from(assetCacheMap.entries())) {
-    if (entry.boardId === boardId) removeCacheEntry(key);
+  for (const key of Array.from(assetCacheMap.keys())) {
+    if (key.startsWith(`${boardId}:`)) assetCacheMap.delete(key);
   }
-  const currentPrefix = `${currentAssetUserScope()}:${boardId}:`;
   for (const key of Array.from(hashToAssetIdMap.keys())) {
-    if (key.startsWith(currentPrefix)) hashToAssetIdMap.delete(key);
+    if (key.startsWith(`${boardId}:`)) hashToAssetIdMap.delete(key);
   }
   for (const key of Array.from(inFlightAssetRequests.keys())) {
-    if (key.startsWith(currentPrefix)) inFlightAssetRequests.delete(key);
+    if (key.startsWith(`${boardId}:`)) inFlightAssetRequests.delete(key);
   }
 }
 
-/** Exposed only for tests and diagnostics. */
+
+/** Compatibility diagnostics for the newer UI/tests. Data-URL cache size is not byte-tracked. */
 export function getAssetCacheStats(): { entries: number; bytes: number; maxBytes: number } {
-  return {
-    entries: assetCacheMap.size,
-    bytes: totalAssetCacheBytes,
-    maxBytes: MAX_ASSET_CACHE_BYTES,
-  };
+  return { entries: assetCacheMap.size, bytes: 0, maxBytes: MAX_ASSET_CACHE_BYTES };
 }
