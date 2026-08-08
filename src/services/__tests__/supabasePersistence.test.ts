@@ -6,6 +6,7 @@ import {
   partitionMutationPayloads,
   sanitizeForDatabase,
   sanitizeElementForStorage,
+  mergeRemoteElementData,
   simplifyPoints,
   stableHash,
 } from '../boardPersistence';
@@ -93,6 +94,35 @@ describe('Supabase persistence primitives', () => {
     expect(() => sanitizeElementForStorage({ id: '', type: 'text' } as unknown as BoardElement))
       .toThrow(/element id/i);
     expect(() => sanitizeElementForStorage({ id: 'bad', type: 'unknown' } as unknown as BoardElement))
+      .toThrow(/element type/i);
+  });
+
+  it('merges compact realtime patches into a complete validated element', () => {
+    const existing = {
+      id: 'text-live-1',
+      type: 'text',
+      x: 10,
+      y: 20,
+      width: 200,
+      height: 60,
+      text: 'old',
+      color: '#000000',
+      fontSize: 16,
+      zIndex: 4,
+    } as BoardElement;
+
+    const merged = mergeRemoteElementData(existing, { text: 'live text' }, existing.id, true);
+    expect(merged).toMatchObject({
+      id: 'text-live-1',
+      type: 'text',
+      x: 10,
+      y: 20,
+      text: 'live text',
+    });
+  });
+
+  it('rejects a compact realtime patch when no complete element exists', () => {
+    expect(() => mergeRemoteElementData(undefined, { text: 'orphan patch' }, 'text-missing', true))
       .toThrow(/element type/i);
   });
 

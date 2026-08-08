@@ -16,7 +16,7 @@ production database.
 - Bounded exponential checkpoint retry and idle socket cleanup.
 - Guest-session protection when unsynced anonymous edits still exist.
 - CSP-safe graph expression parsing with no `eval` or `new Function`.
-- Bounded private object-URL media cache and exact board-cache eviction.
+- Bounded private data-URL media cache and exact board-cache eviction.
 - More complete bounded PNG/SVG/PDF exports.
 - Production-compatible fresh migrations using text board/presence identifiers.
 

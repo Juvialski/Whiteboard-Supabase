@@ -15,7 +15,7 @@ browser, persistent Render disks, or paid infrastructure.
 7. Large reconnect/paste/import queues use resumable 400-item/approximately-6-MB RPC batches.
 8. One authenticated WebSocket per browser/board with immutable identity and permission refresh.
 9. Anonymous students can redeem valid links but cannot create boards or share links; Turnstile is optional.
-10. Private Storage has MIME/signature checks, 20 MB files, bounded board usage, and a 64 MB object-URL cache.
+10. Private Storage has MIME/signature checks, 20 MB files, bounded board usage, and a 64 MB bounded data-URL LRU cache.
 11. Dashboard queries are lightweight and keyset-paginated; high-frequency collaboration avoids Postgres.
 12. A safe graph parser replaces runtime JavaScript evaluation and supports graph exports.
 13. PNG/SVG/PDF exports cover persisted media and all noninteractive board element types.

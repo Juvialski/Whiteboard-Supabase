@@ -7,7 +7,7 @@ interface AudioComponentProps {
   element: AudioElement;
   isSelected: boolean;
   isInteractive: boolean;
-  boardId?: string;
+  boardId: string;
   onSelect: (e: React.MouseEvent) => void;
   onUpdate: (updates: Partial<AudioElement>) => void;
   onDelete: () => void;

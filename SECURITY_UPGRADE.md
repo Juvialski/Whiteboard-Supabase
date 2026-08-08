@@ -78,7 +78,7 @@ Never configure a service-role key in this application.
 - Cursor and live-stroke traffic does not write to Postgres.
 - Dashboard queries are lightweight and keyset-paginated.
 - Private files are limited to 20 MB each; PDF import is limited to 25 MB/100 pages.
-- Downloaded assets use a 64 MB revocable object-URL cache.
+- Downloaded assets use a 64 MB identity-scoped bounded data-URL cache.
 - Offline mutation queues are account-scoped, serialized, and flushed in bounded batches.
 - No Supabase keep-alive query is used.
 - API and WebSocket limits are in-process because Render runs one instance.

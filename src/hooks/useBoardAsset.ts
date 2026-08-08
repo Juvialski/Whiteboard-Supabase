@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getBoardAsset, BoardAssetDoc } from '../services/storageService';
+import { getBoardAsset, AssetLoadError, type BoardAssetDoc } from '../services/storageService';
 
 export interface UseBoardAssetResult {
   data: string | null;
@@ -72,11 +72,18 @@ export function useBoardAsset(
       })
       .catch((err) => {
         if (!isMounted) return;
+        const normalized = err instanceof Error ? err : new Error(String(err));
+        if (normalized instanceof AssetLoadError) {
+          console.warn(`[board-asset:${normalized.code}] ${normalized.message}`);
+        }
         if (fallbackInlineData) {
           setData(fallbackInlineData);
+          // A temporary inline source keeps the element usable while still
+          // preserving diagnostics in the console.
           setError(null);
         } else {
-          setError(err instanceof Error ? err : new Error(String(err)));
+          setData(null);
+          setError(normalized);
         }
       })
       .finally(() => {

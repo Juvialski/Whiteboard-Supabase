@@ -32,6 +32,7 @@ describe('ImageComponent', () => {
     isSelected: false,
     currentUser: mockUser,
     zoom: 1,
+    boardId: 'board-test',
     onSelect: vi.fn(),
     onUpdate: vi.fn(),
     onDelete: vi.fn(),

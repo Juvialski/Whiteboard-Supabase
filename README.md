@@ -13,7 +13,7 @@ Supabase Free project and one Render Free web service.
 - Private Storage for images, signatures, audio, and PDF pages
 - One WebSocket per board/browser for cursors, live strokes, previews, and manifests
 - Project/user/board-scoped IndexedDB queues for unsynced edits
-- Bounded object-URL media cache; cloud boards are not duplicated into localStorage
+- Bounded data-URL media cache; cloud boards are not duplicated into localStorage
 - Lightweight keyset-paginated dashboard queries
 
 ## Start a new project

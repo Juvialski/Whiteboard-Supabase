@@ -10,7 +10,7 @@ interface ImageComponentProps {
   isSelected: boolean;
   currentUser: UserProfile;
   zoom: number;
-  boardId?: string;
+  boardId: string;
   onSelect: (e: React.MouseEvent) => void;
   onUpdate: (updates: Partial<ImageElement>) => void;
   onDelete: () => void;
@@ -216,7 +216,10 @@ export default function ImageComponent({
               <span>Loading asset...</span>
             </div>
           ) : assetError && !imageSrc ? (
-            <div className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center">
+            <div
+              className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center"
+              title={assetError.message}
+            >
               <span>Asset load failed</span>
               <button
                 onClick={retryAsset}

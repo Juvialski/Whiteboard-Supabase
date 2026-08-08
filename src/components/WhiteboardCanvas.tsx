@@ -6,6 +6,7 @@ import { getBoardPermissions } from "../utils/boardPermissions";
 import {
   subscribeToBoardState,
   queueElementMutation,
+  applyRemoteOperation,
   applyBoardMetadataPatchLocally,
   flushBoardCheckpoint,
   sanitizeElementForStorage,
@@ -383,6 +384,7 @@ export default function WhiteboardCanvas({
     selectedIds: string[];
   }>>({});
   const [wsLatency, setWsLatency] = useState<number | null>(null);
+  const remoteOperationSequenceRef = useRef(0);
 
   // Recovery and pending-mutation caches are user/project scoped. The canvas
   // waits for current Supabase authorization before rendering cloud state.
@@ -514,30 +516,23 @@ export default function WhiteboardCanvas({
           delete remoteDrawingStreamsRef.current[msg.userId];
           remoteDrawingStreamsDirtyRef.current = true;
         } else if (msg.type === "element_update") {
-          // Restore the proven direct relay behavior from the last working
-          // collaboration build. Realtime messages update React immediately;
-          // the normal checkpoint/manifest path remains the durable authority.
           const { elementId, elementData, actionType, isMerge } = msg;
           if (typeof elementId !== 'string' || !['set', 'delete'].includes(actionType)) return;
-          setElements((previous) => {
-            let updated: BoardElement[];
-            if (actionType === 'delete') {
-              updated = previous.filter((element) => element.id !== elementId);
-            } else {
-              if (!elementData || typeof elementData !== 'object') return previous;
-              const exists = previous.some((element) => element.id === elementId);
-              if (exists) {
-                updated = previous.map((element) =>
-                  element.id === elementId
-                    ? (isMerge ? { ...element, ...elementData, id: elementId } : { ...elementData, id: elementId }) as BoardElement
-                    : element
-                );
-              } else {
-                updated = [...previous, { ...elementData, id: elementId } as BoardElement];
-              }
-            }
-            elementsRef.current = updated;
-            return updated;
+          if (actionType !== 'delete' && (!elementData || typeof elementData !== 'object')) return;
+
+          // Route realtime previews through the persistence controller again. It
+          // now understands compact merge patches, so live text stays immediate
+          // while local unsynced edits retain conflict priority. The board-state
+          // subscriber below updates React synchronously from this notification.
+          applyRemoteOperation(boardId, {
+            operationId: `ws-${String(msg.userId || 'peer')}-${++remoteOperationSequenceRef.current}-${elementId}-${actionType}`,
+            clientId: String(msg.userId || 'peer'),
+            baseRevision: 0,
+            elementId,
+            action: actionType,
+            data: actionType === 'delete' ? null : elementData,
+            updatedAt: Number(msg.lastActive || Date.now()),
+            isMerge: isMerge === true,
           });
         } else if (msg.type === "element_focus") {
           setRemoteSelections((prev) => ({

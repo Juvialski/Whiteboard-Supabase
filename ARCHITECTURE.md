@@ -51,7 +51,7 @@ authentication; ephemeral events are dropped under disconnection or backpressure
 
 Images, signatures, audio, and PDF pages are uploaded to private Supabase Storage.
 Rows contain asset IDs and metadata rather than Base64 media. Downloads use
-revocable object URLs in a 64 MB bounded cache with active-reference protection
+self-contained data URLs in a 64 MB bounded LRU cache with identity-scoped eviction
 and in-flight request deduplication.
 
 ## Graphs and exports

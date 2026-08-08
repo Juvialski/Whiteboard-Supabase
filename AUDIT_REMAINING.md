@@ -45,9 +45,9 @@ into it.
      Cartesian, polar, and isometric grid modes.
 
 5. **Bounded private-media cache**
-   - Downloaded assets use revocable object URLs with a 64 MB LRU-style cap.
-   - Mounted components retain active assets, in-flight requests are deduplicated,
-     and account/board cache clearing revokes unused URLs.
+   - Downloaded assets use self-contained data URLs in a 64 MB LRU-style cache.
+   - Eviction never invalidates an image already rendered by React, in-flight
+     requests are deduplicated, and account/board cache clearing is identity-scoped.
 
 6. **More complete exports**
    - PNG/SVG/PDF rendering includes private images, PDF backgrounds, drawings,

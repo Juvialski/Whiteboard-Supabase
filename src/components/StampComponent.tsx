@@ -32,7 +32,7 @@ interface StampComponentProps {
   element: StampElement;
   isSelected: boolean;
   isInteractive: boolean;
-  boardId?: string;
+  boardId: string;
   onSelect: (e: React.MouseEvent) => void;
   onUpdate: (updates: Partial<StampElement>) => void;
   onDelete: () => void;

@@ -73,4 +73,19 @@ describe('TextComponent', () => {
     fireEvent.click(screen.getByTitle('Larger font'));
     expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 18 }));
   });
+  it('coalesces typing into a live update before blur', () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+    render(<TextComponent {...defaultProps} isSelected={true} onUpdate={onUpdate} />);
+
+    fireEvent.doubleClick(screen.getByText('Hello World'));
+    const textarea = screen.getByDisplayValue('Hello World');
+    fireEvent.change(textarea, { target: { value: 'Live to student' } });
+
+    expect(onUpdate).not.toHaveBeenCalledWith({ text: 'Live to student' });
+    vi.advanceTimersByTime(180);
+    expect(onUpdate).toHaveBeenCalledWith({ text: 'Live to student' });
+    vi.useRealTimers();
+  });
+
 });

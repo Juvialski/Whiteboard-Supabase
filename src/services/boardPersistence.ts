@@ -105,7 +105,7 @@ export interface RemoteOperation {
   baseRevision: number;
   elementId: string;
   action: 'set' | 'delete';
-  data: BoardElement | null;
+  data: BoardElement | Partial<BoardElement> | null;
   updatedAt: number;
   isMerge?: boolean;
 }
@@ -1082,6 +1082,27 @@ export function queueElementMutation(
   scheduleFlush(control);
 }
 
+export function mergeRemoteElementData(
+  existing: BoardElement | undefined,
+  incoming: BoardElement | Partial<BoardElement>,
+  elementId: string,
+  isMerge: boolean,
+): BoardElement {
+  // Compact realtime patches (for example { text: "hello" }) are only valid
+  // when they can be merged into an existing complete element. Sanitize the
+  // completed candidate, not the partial patch by itself, so normal persistence
+  // validation remains the single source of truth.
+  const candidate = isMerge && existing
+    ? { ...existing, ...incoming, id: elementId }
+    : { ...incoming, id: elementId };
+
+  let clean = sanitizeElementForStorage(candidate as BoardElement);
+  if (clean.type === 'drawing' && Array.isArray((clean as any).points)) {
+    clean = { ...clean, points: limitDrawingPoints((clean as any).points) } as BoardElement;
+  }
+  return clean;
+}
+
 export function applyRemoteOperation(boardId: string, operation: RemoteOperation): void {
   const control = getOrCreateControl(boardId);
   if (control.appliedOperationIds.has(operation.operationId)) return;
@@ -1100,22 +1121,20 @@ export function applyRemoteOperation(boardId: string, operation: RemoteOperation
     shard.delete(operation.elementId);
     control.currentElements.delete(operation.elementId);
   } else if (operation.data) {
-    let incoming: BoardElement;
     try {
-      incoming = sanitizeElementForStorage({ ...operation.data, id: operation.elementId } as BoardElement);
-      if (incoming.type === 'drawing' && Array.isArray((incoming as any).points)) {
-        incoming = { ...incoming, points: limitDrawingPoints((incoming as any).points) } as BoardElement;
-      }
+      const existing = control.currentElements.get(operation.elementId);
+      const next = mergeRemoteElementData(
+        existing,
+        operation.data,
+        operation.elementId,
+        operation.isMerge === true,
+      );
+      shard.set(operation.elementId, next);
+      control.currentElements.set(operation.elementId, next);
     } catch (error) {
       console.warn('Ignored an invalid realtime element update.', error);
       return;
     }
-    const existing = control.currentElements.get(operation.elementId);
-    const next = operation.isMerge && existing
-      ? sanitizeElementForStorage({ ...existing, ...incoming, id: operation.elementId } as BoardElement)
-      : incoming;
-    shard.set(operation.elementId, next);
-    control.currentElements.set(operation.elementId, next);
   }
   if (shard.size > 0) control.shards.set(shardId, shard);
   else control.shards.delete(shardId);
