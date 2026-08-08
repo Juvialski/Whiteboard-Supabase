@@ -35,10 +35,21 @@ export function useBoardAsset(
       return;
     }
 
-    if (!boardId || !assetId) {
+    if (!assetId) {
       setData(fallbackInlineData || null);
       setLoading(false);
       setError(null);
+      return;
+    }
+
+    // Persisted media has only an assetId because inline src/audio data is
+    // intentionally stripped before saving. A missing boardId therefore means
+    // the caller forgot to forward board context; surface that as a real error
+    // instead of silently rendering <img src=""> and only showing alt text.
+    if (!boardId) {
+      setData(fallbackInlineData || null);
+      setLoading(false);
+      setError(new Error(`Board context is required to load asset ${assetId}`));
       return;
     }
 

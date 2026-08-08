@@ -3771,7 +3771,8 @@ export default function WhiteboardCanvas({
                   selectedIdsLength={selectedIds.length}
                   activeTool={activeTool}
                   canWrite={canWrite}
-                            onSelectElement={handleSelectElement}
+                  boardId={boardId}
+                  onSelectElement={handleSelectElement}
                   onUpdateElement={handleUpdateElement}
                   onDeleteElement={handleDeleteElement}
                 />

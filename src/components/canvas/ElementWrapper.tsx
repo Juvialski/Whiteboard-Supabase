@@ -134,7 +134,9 @@ export const ElementWrapper = React.memo(({
   selectedIdsLength: number;
   activeTool: string;
   canWrite: boolean;
-  boardId?: string;
+  // Required board context for persisted media. Images/audio/stamp signatures use
+  // this ID to resolve their assetId from the private Supabase Storage bucket.
+  boardId: string;
   onSelectElement: (id: string, e: React.MouseEvent) => void;
   onUpdateElement: (id: string, updates: Partial<BoardElement>) => void;
   onDeleteElement: (id: string) => void;
