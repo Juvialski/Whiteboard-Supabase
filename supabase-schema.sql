@@ -203,6 +203,7 @@ as $$
   )
 $$;
 
+drop function if exists public.list_my_boards(integer, integer);
 create or replace function public.list_my_boards(
   p_limit integer default 13,
   p_offset integer default 0
