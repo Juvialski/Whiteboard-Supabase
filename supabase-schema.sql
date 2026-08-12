@@ -2955,7 +2955,6 @@ grant execute on function public.apply_board_mutations(text, jsonb) to authentic
 -- The earlier storage INSERT policy depended on storage object metadata during
 -- the INSERT check. Bucket limits already enforce MIME type and file size, so
 -- this policy keeps authorization strict while avoiding that fragile check.
-
 -- Ensure the private free-tier bucket exists and has conservative limits.
 insert into storage.buckets (
   id,
@@ -3065,7 +3064,6 @@ using (
 -- Allow board owners/admins to switch one redeemed member between editor and
 -- viewer without affecting the board-wide students_can_write master switch.
 -- Existing membership expiry is preserved.
-
 create or replace function public.update_board_member_role(
   p_board_id text,
   p_user_id uuid,
