@@ -1049,7 +1049,8 @@ export default function WhiteboardCanvas({
     }
   }, [canManage, isPresenterMode]);
 
-  const isPdfBoard = boardName.startsWith("PDF: ");
+  const isPdfBoard = boardName.startsWith("PDF: ") || pdfPages.length > 0;
+  const [isAppendingPdf, setIsAppendingPdf] = useState(false);
   const [hasCentered, setHasCentered] = useState(false);
 
   // Mirror refs for multi-touch and touch gesture synchronization
@@ -1659,7 +1660,128 @@ export default function WhiteboardCanvas({
       saveElementLocallyAndSync(id, newPage);
       showSyncToast("Blank page added to document", "success");
     }
-  }, [pdfPages, saveElementLocallyAndSync, showSyncToast]);
+  }, [boardId, pdfPages, saveElementLocallyAndSync, showSyncToast]);
+
+  const handleRotatePdfPage = React.useCallback(async (pageId: string) => {
+    if (!canWrite) {
+      triggerReadOnlyAlert();
+      return;
+    }
+    const page = elements.find((el) => el.id === pageId) as ImageElement | undefined;
+    if (!page) return;
+
+    const updatedPage: ImageElement = {
+      ...page,
+      width: page.height,
+      height: page.width,
+      updatedAt: Date.now(),
+    };
+
+    saveElementLocallyAndSync(pageId, updatedPage);
+    pushToUndo({ type: 'update', elementId: pageId, beforeData: page, afterData: updatedPage });
+    showSyncToast("Page rotated", "success");
+  }, [canWrite, elements, pushToUndo, saveElementLocallyAndSync, showSyncToast, triggerReadOnlyAlert]);
+
+  const handleDeletePdfPage = React.useCallback((pageId: string) => {
+    if (!canWrite) {
+      triggerReadOnlyAlert();
+      return;
+    }
+    const page = elements.find((el) => el.id === pageId);
+    if (!page) return;
+
+    saveElementLocallyAndSync(pageId, undefined, false, 'delete');
+    pushToUndo({ type: 'delete', elementId: pageId, beforeData: page });
+
+    setActivePdfPageIndex((prev) => {
+      const remaining = pdfPages.filter((p) => p.id !== pageId);
+      if (remaining.length === 0) return 0;
+      return Math.min(prev, remaining.length - 1);
+    });
+
+    showSyncToast("PDF page removed", "success");
+  }, [canWrite, elements, pdfPages, pushToUndo, saveElementLocallyAndSync, showSyncToast, triggerReadOnlyAlert]);
+
+  const handleAppendPdf = React.useCallback(async (file: File) => {
+    if (!canWrite) {
+      triggerReadOnlyAlert();
+      return;
+    }
+    if (!file) return;
+
+    setIsAppendingPdf(true);
+    showSyncToast("Processing PDF pages...", "info");
+
+    try {
+      const { MAX_PDF_FILE_BYTES, pdfToImages, calculateNextPdfPagePositions } = await import("../utils/pdf");
+
+      if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+        showSyncToast("Please select a valid PDF file.", "error");
+        return;
+      }
+
+      if (file.size > MAX_PDF_FILE_BYTES) {
+        showSyncToast(`This PDF exceeds the ${Math.round(MAX_PDF_FILE_BYTES / 1024 / 1024)} MB limit.`, "error");
+        return;
+      }
+
+      const images = await pdfToImages(file);
+      if (images.length === 0) {
+        showSyncToast("No pages found in PDF.", "error");
+        return;
+      }
+
+      showSyncToast(`Adding ${images.length} pages to board...`, "info");
+
+      const positions = calculateNextPdfPagePositions(pdfPages, images, 40);
+      const startIndex = pdfPages.length;
+
+      for (let idx = 0; idx < images.length; idx++) {
+        const img = images[idx];
+        const pos = positions[idx] || { x: 0, y: 0 };
+        const elementId = `pdf-page-${startIndex + idx}-${Date.now()}`;
+
+        let assetId: string | undefined;
+        let mimeType = "image/jpeg";
+
+        if (boardId && !isSandboxEnvironment()) {
+          try {
+            const { saveBoardAsset } = await import("../services/storageService");
+            const meta = await saveBoardAsset(boardId, undefined, img.src, "image/jpeg");
+            assetId = meta.assetId;
+            mimeType = meta.mimeType;
+          } catch (err) {
+            console.error("Failed to save appended PDF page asset:", err);
+          }
+        }
+
+        const newPage: ImageElement = {
+          id: elementId,
+          type: "image",
+          x: pos.x,
+          y: pos.y,
+          width: img.width,
+          height: img.height,
+          ...(assetId ? { assetId, mimeType } : { src: img.src }),
+          zIndex: 1,
+          locked: true,
+          updatedAt: Date.now(),
+        };
+
+        saveElementLocallyAndSync(elementId, newPage);
+        pushToUndo({ type: "add", elementId, afterData: newPage });
+      }
+
+      showSyncToast(`Successfully combined ${images.length} pages from ${file.name}`, "success");
+      setActivePdfPageIndex(startIndex);
+      handleJumpToPdfPage(startIndex);
+    } catch (err: any) {
+      console.error("Error appending PDF:", err);
+      showSyncToast(err instanceof Error ? err.message : "Failed to add PDF pages", "error");
+    } finally {
+      setIsAppendingPdf(false);
+    }
+  }, [boardId, canWrite, handleJumpToPdfPage, pdfPages, pushToUndo, saveElementLocallyAndSync, showSyncToast, triggerReadOnlyAlert]);
 
   const handleSaveVoiceNote = React.useCallback(async (audioDataUrl: string, durationSec: number) => {
     if (!checkCreationRateLimit(4, 3000)) return;
@@ -4123,9 +4245,14 @@ export default function WhiteboardCanvas({
           pdfPages={pdfPages}
           currentPageIndex={activePdfPageIndex}
           onJumpToPage={handleJumpToPdfPage}
+          onRotatePage={handleRotatePdfPage}
+          onDeletePage={handleDeletePdfPage}
+          onAppendPdf={handleAppendPdf}
           onInsertBlankPage={handleInsertBlankPdfPage}
           onExportPdf={handleDownloadPdfWithDrawings}
           isExporting={isGeneratingPdf}
+          isAppending={isAppendingPdf}
+          canWrite={canWrite}
         />
       )}
 

@@ -1501,7 +1501,7 @@ export default function Dashboard({
                          setPdfUploadState({...pdfUploadState, selectedPages: newSelected});
                        }}
                      >
-                       <img src={img.src} alt={`Page ${i+1}`} className="w-full h-full object-cover" />
+                       <img src={img.src} alt={`Page ${i+1}`} className="w-full h-full object-contain" />
                        <div className="absolute top-2 left-2 w-6 h-6 rounded-full border-2 flex items-center justify-center bg-white shadow-sm transition-colors"
                             style={{
                               borderColor: pdfUploadState.selectedPages[i] ? '#3b82f6' : '#cbd5e1',

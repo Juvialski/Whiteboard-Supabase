@@ -8,10 +8,17 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 export const MAX_PDF_FILE_BYTES = 25 * 1024 * 1024;
 export const MAX_PDF_PAGES = 100;
-const MAX_RENDERED_PAGE_DIMENSION = 1200;
-const MAX_RENDER_SCALE = 1.5;
+export const MAX_RENDERED_PAGE_DIMENSION = 2400;
+export const MAX_RENDER_SCALE = 2.5;
+export const PDF_RENDER_QUALITY = 0.92;
 
-export async function pdfToImages(file: File): Promise<{ src: string, width: number, height: number }[]> {
+export interface RenderedPdfPage {
+  src: string;
+  width: number;
+  height: number;
+}
+
+export async function pdfToImages(file: File): Promise<RenderedPdfPage[]> {
   const looksLikePdf = file instanceof File
     && (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'));
   if (!looksLikePdf) throw new Error('Please choose a valid PDF file.');
@@ -30,7 +37,7 @@ export async function pdfToImages(file: File): Promise<{ src: string, width: num
       throw new Error(`This PDF has ${pdf.numPages} pages. The maximum supported board size is ${MAX_PDF_PAGES} pages.`);
     }
 
-    const images: { src: string; width: number; height: number }[] = [];
+    const images: RenderedPdfPage[] = [];
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       try {
@@ -45,13 +52,17 @@ export async function pdfToImages(file: File): Promise<{ src: string, width: num
         const context = canvas.getContext('2d');
         if (!context) throw new Error(`Unable to prepare PDF page ${pageNumber}.`);
 
+        // Enable high quality image smoothing
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+
         await page.render({
           canvasContext: context,
           viewport,
         } as any).promise;
 
         images.push({
-          src: canvas.toDataURL('image/jpeg', 0.72),
+          src: canvas.toDataURL('image/jpeg', PDF_RENDER_QUALITY),
           width: canvas.width,
           height: canvas.height,
         });
@@ -71,6 +82,57 @@ export async function pdfToImages(file: File): Promise<{ src: string, width: num
       if (pdf) await (pdf as any).destroy?.();
       else await (loadingTask as any).destroy?.();
     } catch { /* best-effort PDF.js cleanup */ }
+  }
+}
+
+/**
+ * Calculates sequentially aligned coordinates for appending new PDF pages to an existing set of pages.
+ */
+export function calculateNextPdfPagePositions(
+  existingPages: ImageElement[],
+  newPages: { width: number; height: number }[],
+  gap: number = 40
+): { x: number; y: number }[] {
+  if (newPages.length === 0) return [];
+
+  if (existingPages.length === 0) {
+    let currY = 0;
+    return newPages.map((page) => {
+      const pos = { x: 0, y: currY };
+      currY += page.height + gap;
+      return pos;
+    });
+  }
+
+  // Check if existing board is oriented horizontally or vertically
+  let isHorizontal = false;
+  if (existingPages.length >= 2) {
+    const p1 = existingPages[0];
+    const p2 = existingPages[1];
+    if (Math.abs(p2.x - p1.x) > Math.abs(p2.y - p1.y)) {
+      isHorizontal = true;
+    }
+  }
+
+  // Find bounding edge of current pages
+  if (isHorizontal) {
+    const maxX = Math.max(...existingPages.map((p) => p.x + p.width));
+    const baseY = existingPages[0]?.y ?? 0;
+    let currX = maxX + gap;
+    return newPages.map((page) => {
+      const pos = { x: currX, y: baseY };
+      currX += page.width + gap;
+      return pos;
+    });
+  } else {
+    const maxY = Math.max(...existingPages.map((p) => p.y + p.height));
+    const baseX = existingPages[0]?.x ?? 0;
+    let currY = maxY + gap;
+    return newPages.map((page) => {
+      const pos = { x: baseX, y: currY };
+      currY += page.height + gap;
+      return pos;
+    });
   }
 }
 
@@ -129,7 +191,7 @@ export async function exportPdfWithDrawings(
     }
 
     try {
-      const imageData = canvas.toDataURL('image/jpeg', 0.9);
+      const imageData = canvas.toDataURL('image/jpeg', 0.95);
       document.addImage(imageData, 'JPEG', 0, 0, pdfPage.width, pdfPage.height, undefined, 'FAST');
     } finally {
       // jsPDF has copied the encoded page; release the browser pixel buffer before

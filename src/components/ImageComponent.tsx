@@ -192,19 +192,21 @@ export default function ImageComponent({
 
   const isLocked = element.locked;
 
+  const isPdfPage = Boolean(element.id && typeof element.id === 'string' && element.id.startsWith('pdf-page-'));
+
   return (
     <>
       <div
         onPointerDown={onSelect}
         className={`absolute select-none flex flex-col justify-between transition-shadow duration-150 group ${cursorClass} ${
           isSelected ? 'ring-2 ring-blue-600 shadow-xl' : ''
-        } ${element.id && typeof element.id === 'string' && element.id.startsWith('pdf-page-') ? 'shadow-lg bg-white border border-slate-200' : ''}`}
+        } ${isPdfPage ? 'shadow-lg bg-white border border-slate-200' : ''}`}
         style={{
           left: element.x,
           top: element.y,
           width: element.width,
           height: element.height,
-          zIndex: isSelected ? 40 : (element.id && typeof element.id === 'string' && element.id.startsWith('pdf-page-') ? 1 : (element.zIndex ?? 10)),
+          zIndex: isSelected ? 40 : (isPdfPage ? 1 : (element.zIndex ?? 10)),
         }}
         id={`image-${element.id}`}
       >
@@ -231,8 +233,9 @@ export default function ImageComponent({
           ) : (
             <img
               src={imageSrc || ''}
-              alt="Pasted canvas content"
-              className="w-full h-full object-cover select-none pointer-events-none"
+              alt={isPdfPage ? `PDF Page ${element.id}` : 'Pasted canvas content'}
+              className={`w-full h-full select-none pointer-events-none ${isPdfPage ? 'object-contain' : 'object-cover'}`}
+              style={{ imageRendering: 'auto' }}
               referrerPolicy="no-referrer"
             />
           )}

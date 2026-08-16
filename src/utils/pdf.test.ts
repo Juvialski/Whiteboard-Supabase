@@ -35,6 +35,7 @@ vi.mock('jspdf', () => {
 });
 
 import {
+  calculateNextPdfPagePositions,
   exportPdfWithDrawings,
   MAX_PDF_FILE_BYTES,
   MAX_PDF_PAGES,
@@ -58,18 +59,35 @@ describe('pdf utilities', () => {
     HTMLCanvasElement.prototype.toDataURL = vi.fn().mockReturnValue('data:image/jpeg;base64,mock');
   });
 
-  it('renders pages with a bounded scale and releases PDF resources', async () => {
+  it('renders pages with a high-definition scale and releases PDF resources', async () => {
     const file = new File(['dummy content'], 'test.pdf', { type: 'application/pdf' });
     const result = await pdfToImages(file);
 
     expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({
       src: 'data:image/jpeg;base64,mock',
-      width: 1200,
-      height: 900,
+      width: 2000,
+      height: 1500,
     });
     expect(pdfMocks.cleanup).toHaveBeenCalledTimes(2);
     expect(pdfMocks.documentDestroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('calculates aligned coordinates when appending new PDF pages to existing pages', () => {
+    const existingPages: any[] = [
+      { id: 'pdf-page-0-1', type: 'image', x: 0, y: 0, width: 800, height: 1000 },
+      { id: 'pdf-page-1-2', type: 'image', x: 0, y: 1040, width: 800, height: 1000 },
+    ];
+    const newPages = [
+      { width: 800, height: 1000 },
+      { width: 800, height: 1000 },
+    ];
+
+    const positions = calculateNextPdfPagePositions(existingPages, newPages, 40);
+    expect(positions).toEqual([
+      { x: 0, y: 2080 },
+      { x: 0, y: 3120 },
+    ]);
   });
 
   it('rejects oversized and excessive-page PDFs before allocating every page', async () => {
