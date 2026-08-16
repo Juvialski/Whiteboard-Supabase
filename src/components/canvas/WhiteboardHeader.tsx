@@ -19,6 +19,8 @@ import {
   Timer as TimerIcon,
   Keyboard,
   Trash2,
+  Pencil,
+  X,
 } from "lucide-react";
 import { UserProfile } from "../../types";
 import type { BoardSocketHandle } from "../../services/boardSocketService";
@@ -30,6 +32,7 @@ interface WhiteboardHeaderProps {
   setIsTopBarHidden: (hidden: boolean) => void;
   onBackToDashboard: () => void;
   boardName: string;
+  onRenameBoard?: (newName: string) => Promise<void>;
   syncStatus: "synced" | "saving-cloud" | "saved-local" | "offline";
   wsConnected: boolean;
   wsLatency: number | null;
@@ -44,6 +47,8 @@ interface WhiteboardHeaderProps {
   activeCollaboratorIds?: string[];
   followedUserId: string | null;
   setFollowedUserId: (id: string | null) => void;
+  activeFollowedUser?: any;
+  handleFollowUser?: (user: any) => void;
   isPresenterMode: boolean;
   setIsPresenterMode: (val: boolean) => void;
   wsRef: React.MutableRefObject<BoardSocketHandle | null>;
@@ -75,6 +80,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   setIsTopBarHidden,
   onBackToDashboard,
   boardName,
+  onRenameBoard,
   syncStatus,
   wsConnected,
   wsLatency,
@@ -89,6 +95,8 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   activeCollaboratorIds,
   followedUserId,
   setFollowedUserId,
+  activeFollowedUser,
+  handleFollowUser,
   isPresenterMode,
   setIsPresenterMode,
   wsRef,
@@ -115,6 +123,31 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
 }) => {
   const [isPeopleMenuOpen, setIsPeopleMenuOpen] = React.useState(false);
   const [memberUpdatingId, setMemberUpdatingId] = React.useState<string | null>(null);
+  const [isEditingTitle, setIsEditingTitle] = React.useState(false);
+  const [editedTitle, setEditedTitle] = React.useState(boardName);
+  const [isRenamingTitle, setIsRenamingTitle] = React.useState(false);
+
+  React.useEffect(() => {
+    setEditedTitle(boardName);
+  }, [boardName]);
+
+  const handleTitleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onRenameBoard || !editedTitle.trim() || editedTitle.trim() === boardName) {
+      setIsEditingTitle(false);
+      setEditedTitle(boardName);
+      return;
+    }
+    setIsRenamingTitle(true);
+    try {
+      await onRenameBoard(editedTitle.trim());
+      setIsEditingTitle(false);
+    } catch {
+      // Handled by parent
+    } finally {
+      setIsRenamingTitle(false);
+    }
+  };
 
   // The People menu is a live-presence view. When the parent provides the
   // active collaborator id list, an empty list must stay empty rather than
@@ -178,9 +211,61 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
         <div className="hidden sm:block h-5 w-px bg-slate-200 shrink-0" />
 
         <div className="min-w-0 flex items-center gap-1.5 px-1">
-          <span className="truncate max-w-[88px] sm:max-w-[150px] lg:max-w-[220px] text-xs sm:text-sm font-semibold text-slate-900" title={boardName}>
-            {boardName}
-          </span>
+          {isEditingTitle ? (
+            <form onSubmit={handleTitleSubmit} className="flex items-center gap-1">
+              <input
+                type="text"
+                value={editedTitle}
+                onChange={(e) => setEditedTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setIsEditingTitle(false);
+                    setEditedTitle(boardName);
+                  }
+                }}
+                maxLength={160}
+                autoFocus
+                className="w-32 sm:w-44 px-2 py-0.5 text-xs sm:text-sm font-semibold text-slate-900 bg-slate-100 border border-indigo-400 rounded-lg focus:outline-none focus:bg-white"
+              />
+              <button
+                type="submit"
+                disabled={isRenamingTitle || !editedTitle.trim()}
+                className="p-1 hover:bg-emerald-100 rounded text-emerald-600 cursor-pointer disabled:opacity-50"
+                title="Save title"
+              >
+                <Check className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsEditingTitle(false);
+                  setEditedTitle(boardName);
+                }}
+                className="p-1 hover:bg-slate-100 rounded text-slate-400 cursor-pointer"
+                title="Cancel"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </form>
+          ) : (
+            <div className="flex items-center gap-1 group/title min-w-0">
+              <span
+                className="truncate max-w-[88px] sm:max-w-[150px] lg:max-w-[220px] text-xs sm:text-sm font-semibold text-slate-900"
+                title={boardName}
+              >
+                {boardName}
+              </span>
+              {canManage && onRenameBoard && (
+                <button
+                  onClick={() => setIsEditingTitle(true)}
+                  className="opacity-0 group-hover/title:opacity-100 p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-indigo-600 transition-all cursor-pointer"
+                  title="Rename board"
+                >
+                  <Pencil className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          )}
 
           {syncStatus === "synced" && (
             <span

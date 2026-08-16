@@ -3604,7 +3604,43 @@ export default function WhiteboardCanvas({
     }
   };
 
+  const handleRenameBoard = React.useCallback(async (newName: string) => {
+    if (!canManage) {
+      triggerReadOnlyAlert();
+      return;
+    }
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === boardName) return;
 
+    try {
+      if (!isSandboxEnvironment()) {
+        const { doc, setDoc } = await import("../lib/supabaseDb");
+        await setDoc(doc(db, "whiteboards", boardId), {
+          name: trimmed,
+          updatedAt: Date.now(),
+        }, { merge: true });
+      }
+
+      applyBoardMetadataPatchLocally(boardId, {
+        name: trimmed,
+        updatedAt: Date.now(),
+      });
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "board_settings_changed",
+          boardId,
+          name: trimmed,
+          updatedAt: Date.now(),
+        }));
+      }
+
+      showSyncToast("Board renamed successfully", "success");
+    } catch (err) {
+      console.error("Failed to rename board:", err);
+      showSyncToast("Failed to rename board", "error");
+    }
+  }, [boardId, boardName, canManage, showSyncToast, triggerReadOnlyAlert]);
 
   // Zoom handlers
   const handleZoomIn = () => {
@@ -3756,6 +3792,7 @@ export default function WhiteboardCanvas({
         setIsTopBarHidden={setIsTopBarHidden}
         onBackToDashboard={onBackToDashboard}
         boardName={boardName}
+        onRenameBoard={handleRenameBoard}
         syncStatus={syncStatus}
         wsConnected={wsConnected}
         wsLatency={wsLatency}
