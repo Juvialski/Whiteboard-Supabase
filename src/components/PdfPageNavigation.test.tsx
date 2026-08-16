@@ -39,6 +39,22 @@ describe('PdfPageNavigation', () => {
     expect(handleJump).toHaveBeenCalledWith(1);
   });
 
+  it('jumps to typed page number on form submit', () => {
+    const handleJump = vi.fn();
+    render(
+      <PdfPageNavigation
+        pdfPages={mockPdfPages}
+        currentPageIndex={0}
+        onJumpToPage={handleJump}
+      />
+    );
+
+    const input = screen.getByRole('textbox');
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.submit(input.closest('form')!);
+    expect(handleJump).toHaveBeenCalledWith(1);
+  });
+
   it('opens drawer and triggers page deletion modal and confirmation', () => {
     const handleDelete = vi.fn();
     render(

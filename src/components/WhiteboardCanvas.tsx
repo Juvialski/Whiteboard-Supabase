@@ -784,7 +784,18 @@ export default function WhiteboardCanvas({
   const [activePdfPageIndex, setActivePdfPageIndex] = useState(0);
 
   const pdfPages = React.useMemo(() => {
-    return elements.filter((el) => el.type === "image" && typeof el.id === "string" && el.id.startsWith("pdf-page-")) as ImageElement[];
+    const raw = elements.filter(
+      (el) => el.type === "image" && typeof el.id === "string" && el.id.startsWith("pdf-page-")
+    ) as ImageElement[];
+
+    return raw.sort((a, b) => {
+      // Primary: vertical reading order
+      if (Math.abs(a.y - b.y) > 20) {
+        return a.y - b.y;
+      }
+      // Secondary: horizontal reading order
+      return a.x - b.x;
+    });
   }, [elements]);
 
   const sortedElements = React.useMemo(() => {
@@ -803,19 +814,71 @@ export default function WhiteboardCanvas({
   }, [elements]);
 
   const handleJumpToPdfPage = React.useCallback((pageIndex: number) => {
-    const page = pdfPages[pageIndex];
+    if (!pdfPages || pdfPages.length === 0) return;
+    const clampedIndex = Math.max(0, Math.min(pageIndex, pdfPages.length - 1));
+    const page = pdfPages[clampedIndex];
     if (!page) return;
-    setActivePdfPageIndex(pageIndex);
-    const containerW = containerDimensions.width || 1200;
-    const containerH = containerDimensions.height || 800;
-    const targetZoom = Math.min(1.2, (containerH - 120) / (page.height || 800));
-    const targetPanX = containerW / 2 - (page.x + page.width / 2) * targetZoom;
-    const targetPanY = containerH / 2 - (page.y + page.height / 2) * targetZoom;
+
+    setActivePdfPageIndex(clampedIndex);
+
+    const containerW = containerDimensions.width || window.innerWidth || 1200;
+    const containerH = containerDimensions.height || window.innerHeight || 800;
+
+    const availW = Math.max(200, containerW - 80);
+    const availH = Math.max(200, containerH - 140);
+
+    const pageW = page.width || 800;
+    const pageH = page.height || 1000;
+
+    const scaleW = availW / pageW;
+    const scaleH = availH / pageH;
+    const targetZoom = Math.min(1.2, Math.max(0.2, Math.min(scaleW, scaleH)));
+
+    const targetPanX = (containerW - pageW * targetZoom) / 2 - page.x * targetZoom;
+
+    let targetPanY: number;
+    if (pageH * targetZoom <= availH) {
+      targetPanY = (containerH - pageH * targetZoom) / 2 - page.y * targetZoom;
+    } else {
+      targetPanY = 64 - page.y * targetZoom;
+    }
 
     setZoom(targetZoom);
     setPanX(targetPanX);
     setPanY(targetPanY);
   }, [pdfPages, containerDimensions]);
+
+  // Synchronize active page index with current viewport scroll/pan location
+  useEffect(() => {
+    if (!pdfPages || pdfPages.length === 0) return;
+
+    const containerW = containerDimensions.width || window.innerWidth || 1200;
+    const containerH = containerDimensions.height || window.innerHeight || 800;
+
+    const viewCenterX = (-panX + containerW / 2) / zoom;
+    const viewCenterY = (-panY + containerH / 2) / zoom;
+
+    let closestIndex = 0;
+    let minDistanceSq = Infinity;
+
+    pdfPages.forEach((page, idx) => {
+      const pageCenterX = page.x + (page.width || 800) / 2;
+      const pageCenterY = page.y + (page.height || 1000) / 2;
+
+      const dx = pageCenterX - viewCenterX;
+      const dy = pageCenterY - viewCenterY;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq < minDistanceSq) {
+        minDistanceSq = distSq;
+        closestIndex = idx;
+      }
+    });
+
+    if (closestIndex !== activePdfPageIndex) {
+      setActivePdfPageIndex(closestIndex);
+    }
+  }, [panX, panY, zoom, pdfPages, containerDimensions, activePdfPageIndex]);
 
   const handleTimerSync = React.useCallback((timerState: any) => {
     setSyncedTimerState(timerState);
@@ -1127,30 +1190,26 @@ export default function WhiteboardCanvas({
   }, [showSyncToast]);
 
   useEffect(() => {
-    if (isPdfBoard && elements.length > 0 && !hasCentered && containerRef.current) {
-      const pdfPages = elements.filter((el) => typeof el?.id === "string" && el.id.startsWith("pdf-page-"));
-      if (pdfPages.length > 0) {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        pdfPages.forEach((el) => {
-          const img = el as ImageElement;
-          minX = Math.min(minX, img.x);
-          minY = Math.min(minY, img.y);
-          maxX = Math.max(maxX, img.x + img.width);
-          maxY = Math.max(maxY, img.y + img.height);
-        });
+    if (isPdfBoard && pdfPages.length > 0 && !hasCentered && containerRef.current) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      pdfPages.forEach((img) => {
+        minX = Math.min(minX, img.x);
+        minY = Math.min(minY, img.y);
+        maxX = Math.max(maxX, img.x + img.width);
+        maxY = Math.max(maxY, img.y + img.height);
+      });
 
-        const rect = containerRef.current.getBoundingClientRect();
-        const contentWidth = maxX - minX;
-        const targetZoom = Math.min(1.0, (rect.width * 0.9) / contentWidth);
-        const newZoom = Math.max(0.4, targetZoom);
+      const rect = containerRef.current.getBoundingClientRect();
+      const contentWidth = maxX - minX;
+      const targetZoom = Math.min(1.0, (rect.width * 0.9) / Math.max(1, contentWidth));
+      const newZoom = Math.max(0.4, targetZoom);
 
-        setZoom(newZoom);
-        setPanX(rect.width / 2 - (minX + contentWidth / 2) * newZoom);
-        setPanY(60); 
-        setHasCentered(true);
-      }
+      setZoom(newZoom);
+      setPanX(rect.width / 2 - (minX + contentWidth / 2) * newZoom);
+      setPanY(64 - minY * newZoom);
+      setHasCentered(true);
     }
-  }, [isPdfBoard, elements, hasCentered]);
+  }, [isPdfBoard, pdfPages, hasCentered]);
 
   const handleToggleZenMode = () => {
     const nextZenMode = !isZenMode;
