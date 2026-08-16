@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, getDocs, onSnapshot, addDoc, deleteDoc, doc, setDoc, orderBy, limit, startAfter } from '../lib/supabaseDb';
 import { db, auth, supabase } from '../supabase';
 import { Whiteboard, UserProfile } from '../types';
-import { Plus, Trash2, ArrowRight, User, BookOpen, GraduationCap, Users, Sparkles, Copy, Check, FileUp, Loader2, BarChart2, RefreshCw, ShieldCheck, Database, Pencil, X } from 'lucide-react';
+import { Plus, Trash2, ArrowRight, User, BookOpen, GraduationCap, Users, Sparkles, Copy, Check, FileUp, Loader2, BarChart2, RefreshCw, ShieldCheck, Database, Pencil, X, Search } from 'lucide-react';
 import SupabaseSettingsModal from './SupabaseSettingsModal';
 import { isSandboxEnvironment, getSandboxLocalBoards, saveSandboxLocalBoards, saveSandboxLocalElements } from '../utils/sandboxGuard';
 import { trackOperation } from '../utils/databaseInstrumentation';
@@ -85,6 +85,9 @@ export default function Dashboard({
   const [boardToDelete, setBoardToDelete] = useState<string | null>(null);
   const [boardToRename, setBoardToRename] = useState<{ id: string; name: string; description: string } | null>(null);
   const [isRenaming, setIsRenaming] = useState(false);
+  const [boardSearchQuery, setBoardSearchQuery] = useState('');
+  const [categoryTab, setCategoryTab] = useState<'all' | 'assigned' | 'shared' | 'pdf'>('all');
+  const [isDuplicatingId, setIsDuplicatingId] = useState<string | null>(null);
   
   const pdfInputRef = useRef<HTMLInputElement>(null);
   
@@ -926,9 +929,67 @@ export default function Dashboard({
     }
   };
 
+  const handleDuplicateBoard = async (board: Whiteboard, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isDuplicatingId) return;
+    setIsDuplicatingId(board.id);
+
+    try {
+      const copyTitle = `Copy of ${board.name}`;
+      const newBoardData: Omit<Whiteboard, 'id'> = {
+        name: copyTitle,
+        description: board.description || '',
+        createdBy: currentUserProfile?.name || userName || 'Teacher',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        studentId: board.studentId || '',
+        studentName: board.studentName || '',
+        studentsCanWrite: board.studentsCanWrite !== false,
+        accessMode: 'shared',
+      };
+
+      if (isSandboxEnvironment()) {
+        const newId = `board-${Date.now()}`;
+        const newBoardObj = { id: newId, ...newBoardData };
+        const currentBoards = getSandboxLocalBoards();
+        saveSandboxLocalBoards([newBoardObj, ...currentBoards]);
+        
+        const existingElements = localStorage.getItem(`lucid_spark_board_elements_${board.id}`);
+        if (existingElements) {
+          localStorage.setItem(`lucid_spark_board_elements_${newId}`, existingElements);
+        }
+        setBoards((prev) => [newBoardObj, ...prev]);
+      } else {
+        const docRef = await addDoc(collection(db, 'whiteboards'), newBoardData);
+        setBoards((prev) => [{ id: docRef.id, ...newBoardData }, ...prev]);
+      }
+    } catch (err) {
+      console.error('Error duplicating board:', err);
+      alert('Failed to duplicate board.');
+    } finally {
+      setIsDuplicatingId(null);
+    }
+  };
+
   const currentName = currentUserProfile?.name || userName;
-  // The server-side RPC already returns only boards this user owns or was explicitly added to.
   const visibleBoards = boards;
+
+  const filteredBoards = React.useMemo(() => {
+    return boards.filter((board) => {
+      if (categoryTab === 'assigned' && !board.studentId) return false;
+      if (categoryTab === 'shared' && (board.studentId || board.name.startsWith('PDF: '))) return false;
+      if (categoryTab === 'pdf' && !board.name.startsWith('PDF: ')) return false;
+
+      if (!boardSearchQuery.trim()) return true;
+      const q = boardSearchQuery.toLowerCase().trim();
+      return (
+        (board.name && board.name.toLowerCase().includes(q)) ||
+        (board.description && board.description.toLowerCase().includes(q)) ||
+        (board.studentName && board.studentName.toLowerCase().includes(q)) ||
+        (board.createdBy && board.createdBy.toLowerCase().includes(q))
+      );
+    });
+  }, [boards, categoryTab, boardSearchQuery]);
 
   return (
     <div className="h-full bg-slate-50 text-slate-800 flex flex-col font-sans overflow-y-auto" id="lucid-dashboard">
@@ -1358,8 +1419,55 @@ export default function Dashboard({
             )}
           </div>
 
+          {/* Search and Category Filter Bar */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+            {/* Search Input */}
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search boards by name, student, or teacher..."
+                value={boardSearchQuery}
+                onChange={(e) => setBoardSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-8 py-2 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all shadow-xs"
+              />
+              {boardSearchQuery && (
+                <button
+                  onClick={() => setBoardSearchQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* Category Filter Chips */}
+            <div className="flex items-center gap-1 bg-slate-100/80 p-1 rounded-xl border border-slate-200/60 shrink-0 overflow-x-auto">
+              {(
+                [
+                  { id: "all", label: "All" },
+                  { id: "assigned", label: "Students" },
+                  { id: "shared", label: "Shared" },
+                  { id: "pdf", label: "PDFs" },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setCategoryTab(tab.id)}
+                  className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+                    categoryTab === tab.id
+                      ? "bg-white text-blue-600 shadow-xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {visibleBoards.length === 0 ? (
+            {filteredBoards.length === 0 ? (
               <div className="col-span-full bg-white border border-dashed border-slate-200 rounded-xl py-16 text-center space-y-3">
                 <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center mx-auto text-slate-400">
                   <Sparkles className="w-5 h-5" />
@@ -1367,14 +1475,16 @@ export default function Dashboard({
                 <div>
                   <h3 className="font-bold text-slate-800">No Whiteboards Found</h3>
                   <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 leading-relaxed">
-                    {currentName 
-                      ? "Create a whiteboard in teacher mode, or tap the button in the corner to spin up a collaborative canvas!"
-                      : "Please set your nickname or log in with Google to view your whiteboards."}
+                    {boardSearchQuery || categoryTab !== 'all'
+                      ? "No boards match your current search or filter criteria."
+                      : currentName 
+                        ? "Create a whiteboard in teacher mode, or tap the button in the corner to spin up a collaborative canvas!"
+                        : "Please set your nickname or log in with Google to view your whiteboards."}
                   </p>
                 </div>
               </div>
             ) : (
-              visibleBoards.map((board) => {
+              filteredBoards.map((board) => {
                 const isAssigned = !!board.studentId;
                 const permissions = getBoardPermissions(board, auth.currentUser ? { uid: auth.currentUser.uid, admin: adminClaim } : null);
                 const canManage = permissions.canManage || permissions.canDelete || isSandboxEnvironment() || (auth.currentUser && board.ownerUid === auth.currentUser.uid);
@@ -1403,6 +1513,21 @@ export default function Dashboard({
                               title="Rename Board"
                             >
                               <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {canCreateBoards && (
+                            <button
+                              onClick={(e) => handleDuplicateBoard(board, e)}
+                              disabled={isDuplicatingId === board.id}
+                              className="p-1.5 hover:bg-slate-100 rounded text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+                              title="Duplicate Board"
+                            >
+                              {isDuplicatingId === board.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
                             </button>
                           )}
 

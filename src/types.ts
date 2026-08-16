@@ -255,6 +255,8 @@ export interface Collaborator {
   panX?: number;
   panY?: number;
   zoom?: number;
+  viewCenterX?: number;
+  viewCenterY?: number;
   role?: "student" | "teacher";
   lastActive: number;
 }

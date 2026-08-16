@@ -21,6 +21,8 @@ import {
   Trash2,
   Pencil,
   X,
+  Focus,
+  FileDown,
 } from "lucide-react";
 import { UserProfile } from "../../types";
 import type { BoardSocketHandle } from "../../services/boardSocketService";
@@ -63,6 +65,11 @@ interface WhiteboardHeaderProps {
   handleDownloadPdfWithDrawings: () => void;
   isGeneratingPdf: boolean;
   handleExportImage: (format: "png" | "svg") => void;
+  onExportSelection?: () => void;
+  hasSelection?: boolean;
+  onExportBackup?: () => void;
+  onToggleSpotlight?: () => void;
+  isSpotlightActive?: boolean;
   copyBoardLink: () => void;
   copiedLink: boolean;
   isHeaderMenuOpen: boolean;
@@ -111,6 +118,11 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   handleDownloadPdfWithDrawings,
   isGeneratingPdf,
   handleExportImage,
+  onExportSelection,
+  hasSelection,
+  onExportBackup,
+  onToggleSpotlight,
+  isSpotlightActive = false,
   copyBoardLink,
   copiedLink,
   isHeaderMenuOpen,
@@ -663,6 +675,47 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
                 <FileCode className="w-4 h-4 text-indigo-500" />
                 <span>Export SVG</span>
               </button>
+
+              {hasSelection && onExportSelection && (
+                <button
+                  onClick={() => {
+                    onExportSelection();
+                    closeHeaderMenu();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-indigo-700 bg-indigo-50/70 hover:bg-indigo-50 transition-colors"
+                >
+                  <FileDown className="w-4 h-4 text-indigo-600" />
+                  <span>Export Selection (PNG)</span>
+                </button>
+              )}
+
+              {onExportBackup && (
+                <button
+                  onClick={() => {
+                    onExportBackup();
+                    closeHeaderMenu();
+                  }}
+                  className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <FileCode className="w-4 h-4 text-emerald-600" />
+                  <span>Backup Board (.json)</span>
+                </button>
+              )}
+
+              {onToggleSpotlight && canManage && (
+                <button
+                  onClick={() => {
+                    onToggleSpotlight();
+                    closeHeaderMenu();
+                  }}
+                  className={`w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors ${
+                    isSpotlightActive ? "bg-amber-50 text-amber-800 font-bold" : "text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  <Focus className="w-4 h-4 text-amber-600" />
+                  <span>{isSpotlightActive ? "Exit Spotlight" : "Spotlight Mode"}</span>
+                </button>
+              )}
 
               {(onToggleTimer || onToggleZenMode || onOpenShortcuts) && <div className="my-1 h-px bg-slate-100" />}
 

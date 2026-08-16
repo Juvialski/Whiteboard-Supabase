@@ -101,4 +101,25 @@ describe('PdfPageNavigation', () => {
     fireEvent.click(rotateBtn);
     expect(handleRotate).toHaveBeenCalledWith('pdf-page-0-1');
   });
+
+  it('calls onMovePage when move down is clicked', () => {
+    const handleMove = vi.fn();
+    render(
+      <PdfPageNavigation
+        pdfPages={mockPdfPages}
+        currentPageIndex={0}
+        onJumpToPage={vi.fn()}
+        onMovePage={handleMove}
+        canWrite={true}
+      />
+    );
+
+    // Open drawer
+    const drawerBtn = screen.getByTitle(/toggle pdf page drawer/i);
+    fireEvent.click(drawerBtn);
+
+    const moveDownBtn = screen.getByTitle(/move page down/i);
+    fireEvent.click(moveDownBtn);
+    expect(handleMove).toHaveBeenCalledWith(0, 1);
+  });
 });

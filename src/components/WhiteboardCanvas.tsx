@@ -19,6 +19,11 @@ import {
   type BoardSocketHandle,
 } from "../services/boardSocketService";
 import { createSecureBoardShareLink } from "../services/shareLinkService";
+import { recognizeShape } from "../utils/shapeRecognition";
+import LiveReactions, { FloatingReaction } from "./LiveReactions";
+import SpotlightOverlay from "./SpotlightOverlay";
+import { exportSelectionImage } from "../utils/boardExport";
+import { exportBoardBackup } from "../utils/boardBackup";
 import {
   listBoardMembers,
   updateBoardMemberRole,
@@ -473,25 +478,28 @@ export default function WhiteboardCanvas({
             panX: msg.panX,
             panY: msg.panY,
             zoom: msg.zoom,
+            viewCenterX: msg.viewCenterX,
+            viewCenterY: msg.viewCenterY,
             lastActive: msg.lastActive,
           };
           if (isNew) setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
 
+          // When following another user: follow ONLY their screen / viewport (panX, panY, zoom, view center), NOT their mouse cursor movement
           if (followedUserIdRef.current === msg.userId) {
-            const targetZoom = msg.zoom !== undefined ? msg.zoom : 1;
-            const containerW = window.innerWidth;
-            const containerH = window.innerHeight;
+            const targetZoom = msg.zoom !== undefined ? msg.zoom : zoomRef.current;
+            const containerW = containerDimensions.width || window.innerWidth;
+            const containerH = containerDimensions.height || window.innerHeight;
 
-            if (msg.x !== undefined && msg.y !== undefined) {
-              const targetPanX = containerW / 2 - msg.x * targetZoom;
-              const targetPanY = containerH / 2 - msg.y * targetZoom;
-              setPanX((prev) => prev + (targetPanX - prev) * 0.35);
-              setPanY((prev) => prev + (targetPanY - prev) * 0.35);
-              setZoom((prev) => prev + (targetZoom - prev) * 0.35);
+            if (msg.viewCenterX !== undefined && msg.viewCenterY !== undefined) {
+              const targetPanX = containerW / 2 - msg.viewCenterX * targetZoom;
+              const targetPanY = containerH / 2 - msg.viewCenterY * targetZoom;
+              setPanX((prev) => prev + (targetPanX - prev) * 0.45);
+              setPanY((prev) => prev + (targetPanY - prev) * 0.45);
+              setZoom((prev) => prev + (targetZoom - prev) * 0.45);
             } else if (msg.panX !== undefined && msg.panY !== undefined) {
-              setPanX((prev) => prev + (msg.panX - prev) * 0.35);
-              setPanY((prev) => prev + (msg.panY - prev) * 0.35);
-              setZoom((prev) => prev + (targetZoom - prev) * 0.35);
+              setPanX((prev) => prev + (msg.panX - prev) * 0.45);
+              setPanY((prev) => prev + (msg.panY - prev) * 0.45);
+              setZoom((prev) => prev + (targetZoom - prev) * 0.45);
             }
           }
         } else if (msg.type === "request_follow") {
@@ -561,6 +569,16 @@ export default function WhiteboardCanvas({
           setSyncedTimerState(msg.state);
           if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
           else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
+        } else if (msg.type === "emoji_reaction") {
+          setIncomingReaction({
+            id: msg.id || `remote-${Date.now()}-${Math.random()}`,
+            emoji: msg.emoji,
+            userName: msg.userName,
+            color: msg.color,
+            x: window.innerWidth / 2 + (Math.random() * 160 - 80),
+            y: window.innerHeight - 120,
+            createdAt: Date.now(),
+          });
         }
       } catch (error) {
         console.error("Client WebSocket message handling error:", error);
@@ -692,15 +710,15 @@ export default function WhiteboardCanvas({
           const targetCollab = socketCollaboratorsRef.current[nextId];
           if (targetCollab) {
             const targetZoom = targetCollab.zoom || 1;
-            const containerW = window.innerWidth;
-            const containerH = window.innerHeight;
+            const containerW = containerDimensions.width || window.innerWidth;
+            const containerH = containerDimensions.height || window.innerHeight;
 
             let targetPanX = targetCollab.panX;
             let targetPanY = targetCollab.panY;
 
-            if (targetCollab.x !== undefined && targetCollab.y !== undefined) {
-              targetPanX = containerW / 2 - targetCollab.x * targetZoom;
-              targetPanY = containerH / 2 - targetCollab.y * targetZoom;
+            if (targetCollab.viewCenterX !== undefined && targetCollab.viewCenterY !== undefined) {
+              targetPanX = containerW / 2 - targetCollab.viewCenterX * targetZoom;
+              targetPanY = containerH / 2 - targetCollab.viewCenterY * targetZoom;
             }
 
             if (targetPanX !== undefined && targetPanY !== undefined) {
@@ -709,9 +727,9 @@ export default function WhiteboardCanvas({
               setPanY(targetPanY);
             }
 
-            showSyncToast(`Now following ${targetCollab.name}'s view`, "info");
+            showSyncToast(`Now following ${targetCollab.name}'s screen view`, "info");
           } else {
-            showSyncToast("Following user...", "info");
+            showSyncToast("Following screen...", "info");
           }
         } else if (prev !== null) {
           showSyncToast("Stopped following user.", "info");
@@ -720,7 +738,7 @@ export default function WhiteboardCanvas({
         return nextId;
       });
     },
-    [showSyncToast]
+    [containerDimensions.height, containerDimensions.width, showSyncToast]
   );
 
   // Undo History state
@@ -782,6 +800,9 @@ export default function WhiteboardCanvas({
   const [pendingVoiceCoords, setPendingVoiceCoords] = useState<Point | null>(null);
   const [pendingStampCoords, setPendingStampCoords] = useState<Point | null>(null);
   const [activePdfPageIndex, setActivePdfPageIndex] = useState(0);
+  const [incomingReaction, setIncomingReaction] = useState<FloatingReaction | null>(null);
+  const [isSpotlightActive, setIsSpotlightActive] = useState(false);
+  const [spotlightPos, setSpotlightPos] = useState<Point>({ x: 500, y: 300 });
 
   const pdfPages = React.useMemo(() => {
     const raw = elements.filter(
@@ -1998,6 +2019,11 @@ export default function WhiteboardCanvas({
     lastCursorUpdate.current = now;
     lastSyncedCursorPos.current = { x: canvasX, y: canvasY };
 
+    const containerW = containerDimensions.width || window.innerWidth;
+    const containerH = containerDimensions.height || window.innerHeight;
+    const viewCenterX = (-panX + containerW / 2) / zoom;
+    const viewCenterY = (-panY + containerH / 2) / zoom;
+
     // High performance: Use WebSocket if connected to send live cursor!
     if (isWsActive) {
       wsRef.current!.send(JSON.stringify({
@@ -2012,10 +2038,40 @@ export default function WhiteboardCanvas({
         panX,
         panY,
         zoom,
+        viewCenterX,
+        viewCenterY,
         lastActive: now
       }));
     }
   };
+
+  const lastViewportBroadcast = useRef<number>(0);
+  useEffect(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (now - lastViewportBroadcast.current < 40) return;
+    lastViewportBroadcast.current = now;
+
+    const containerW = containerDimensions.width || window.innerWidth;
+    const containerH = containerDimensions.height || window.innerHeight;
+    const viewCenterX = (-panX + containerW / 2) / zoom;
+    const viewCenterY = (-panY + containerH / 2) / zoom;
+
+    wsRef.current.send(JSON.stringify({
+      type: "cursor",
+      boardId,
+      userId: currentUser.id,
+      name: currentUser.name,
+      color: currentUser.color,
+      role: currentUser.role,
+      panX,
+      panY,
+      zoom,
+      viewCenterX,
+      viewCenterY,
+      lastActive: now,
+    }));
+  }, [boardId, containerDimensions.height, containerDimensions.width, currentUser.color, currentUser.id, currentUser.name, currentUser.role, panX, panY, zoom]);
 
 
   const containerRectRef = useRef<DOMRect | null>(null);
@@ -2966,6 +3022,34 @@ export default function WhiteboardCanvas({
           ? [points[0], { x: points[0].x + 0.1, y: points[0].y + 0.1 }]
           : points;
 
+        // Smart shape auto-snap for geometric primitives drawn with pencil
+        const recognized = activeTool === "pencil" && finalPoints.length >= 6 ? recognizeShape(finalPoints) : null;
+        if (recognized) {
+          const shapeId = "shape-" + Date.now() + Math.floor(Math.random() * 100);
+          const newShape: ShapeElement = {
+            id: shapeId,
+            type: "shape",
+            shapeType: recognized.type,
+            x: recognized.x,
+            y: recognized.y,
+            width: recognized.width,
+            height: recognized.height,
+            text: "",
+            color: "transparent",
+            borderColor: activeColor,
+            zIndex: elements.length + 1,
+          };
+          try {
+            await saveElementLocallyAndSync(shapeId, newShape);
+            pushToUndo({ type: "add", elementId: shapeId, afterData: newShape });
+          } catch (err) {
+            console.error("Error saving recognized shape:", err);
+          }
+          drawingPointsRef.current = [];
+          if (localDrawingPathRef.current) localDrawingPathRef.current.setAttribute("d", "");
+          return;
+        }
+
         const id = "draw-" + Date.now() + Math.floor(Math.random() * 100);
         const isHighlighter = activeTool === "highlighter";
         const newStroke: DrawingElement = {
@@ -3642,6 +3726,64 @@ export default function WhiteboardCanvas({
     }
   }, [boardId, boardName, canManage, showSyncToast, triggerReadOnlyAlert]);
 
+  const handleSendReaction = React.useCallback((emoji: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "emoji_reaction",
+        boardId,
+        emoji,
+        userName: currentUser.name,
+        color: currentUser.color,
+        id: `reaction-${Date.now()}-${Math.random()}`,
+        timestamp: Date.now(),
+      }));
+    }
+  }, [boardId, currentUser.name, currentUser.color]);
+
+  const handleExportBackup = React.useCallback(() => {
+    try {
+      exportBoardBackup({
+        name: boardName,
+        description: boardData?.description,
+        studentName: boardData?.studentName,
+        studentsCanWrite: boardData?.studentsCanWrite,
+      }, elements);
+      showSyncToast("Board backup exported", "success");
+    } catch (err) {
+      console.error("Failed to export backup:", err);
+      showSyncToast("Failed to export backup", "error");
+    }
+  }, [boardData, boardName, elements, showSyncToast]);
+
+  const handleExportSelection = React.useCallback(async () => {
+    if (selectedIds.length === 0) return;
+    try {
+      await exportSelectionImage(elements, selectedIds, boardId, `${boardName}_selection`);
+      showSyncToast("Selection exported as PNG", "success");
+    } catch (err) {
+      console.error("Failed to export selection:", err);
+      showSyncToast("Failed to export selection", "error");
+    }
+  }, [boardId, boardName, elements, selectedIds, showSyncToast]);
+
+  const handleMovePdfPage = React.useCallback(async (fromIdx: number, toIdx: number) => {
+    if (!canManage || fromIdx < 0 || toIdx < 0 || fromIdx >= pdfPages.length || toIdx >= pdfPages.length) return;
+    const fromPage = pdfPages[fromIdx];
+    const toPage = pdfPages[toIdx];
+    if (!fromPage || !toPage) return;
+
+    const updatedFrom = { ...fromPage, x: toPage.x, y: toPage.y, updatedAt: Date.now() };
+    const updatedTo = { ...toPage, x: fromPage.x, y: fromPage.y, updatedAt: Date.now() };
+
+    await Promise.all([
+      saveElementLocallyAndSync(updatedFrom.id, updatedFrom),
+      saveElementLocallyAndSync(updatedTo.id, updatedTo),
+    ]);
+
+    setActivePdfPageIndex(toIdx);
+    showSyncToast(`Moved page to position ${toIdx + 1}`, "success");
+  }, [canManage, pdfPages, saveElementLocallyAndSync, showSyncToast]);
+
   // Zoom handlers
   const handleZoomIn = () => {
     const container = containerRef.current;
@@ -3802,6 +3944,11 @@ export default function WhiteboardCanvas({
         redoStack={redoStack}
         handleUndo={handleUndo}
         handleRedo={handleRedo}
+        onExportSelection={handleExportSelection}
+        hasSelection={selectedIds.length > 0}
+        onExportBackup={handleExportBackup}
+        onToggleSpotlight={() => setIsSpotlightActive((prev) => !prev)}
+        isSpotlightActive={isSpotlightActive}
         currentUser={currentUser}
         socketCollaboratorsRef={socketCollaboratorsRef}
         activeCollaboratorIds={activeCollaboratorIds}
@@ -4343,6 +4490,7 @@ export default function WhiteboardCanvas({
           onJumpToPage={handleJumpToPdfPage}
           onRotatePage={handleRotatePdfPage}
           onDeletePage={handleDeletePdfPage}
+          onMovePage={handleMovePdfPage}
           onAppendPdf={handleAppendPdf}
           onInsertBlankPage={handleInsertBlankPdfPage}
           onExportPdf={handleDownloadPdfWithDrawings}
@@ -4351,6 +4499,21 @@ export default function WhiteboardCanvas({
           canWrite={canWrite}
         />
       )}
+
+      {/* Live Reactions Emoji Floating Overlay */}
+      <LiveReactions
+        onSendReaction={handleSendReaction}
+        incomingReaction={incomingReaction}
+      />
+
+      {/* Presenter Focus Spotlight Beam */}
+      <SpotlightOverlay
+        isActive={isSpotlightActive}
+        onClose={() => setIsSpotlightActive(false)}
+        x={spotlightPos.x}
+        y={spotlightPos.y}
+        canManage={canManage}
+      />
 
       {/* Voice Note Recording Modal */}
       <VoiceRecordModal

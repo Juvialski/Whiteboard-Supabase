@@ -902,3 +902,26 @@ export async function exportBoardImage(
     canvas.height = 1;
   }
 }
+
+export async function exportSelectionImage(
+  elements: BoardElement[],
+  selectedIds: string[],
+  boardId: string,
+  fileName: string = 'selection_export'
+): Promise<void> {
+  const selectedSet = new Set(selectedIds);
+  const selectedElements = elements.filter((el) => selectedSet.has(el.id));
+  if (selectedElements.length === 0) return;
+
+  const { canvas } = await renderBoardRegionToCanvas(selectedElements, boardId, undefined, { padding: 24 });
+  const safeName = (fileName || 'selection').replace(/[^a-z0-9_-]+/gi, '_') || 'selection';
+
+  try {
+    const blob = await canvasToBlob(canvas, 'image/png');
+    downloadBlob(blob, `${safeName}.png`);
+  } finally {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
+

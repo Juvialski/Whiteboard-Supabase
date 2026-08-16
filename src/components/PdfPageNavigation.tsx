@@ -12,6 +12,9 @@ import {
   FilePlus,
   AlertTriangle,
   Loader2,
+  ArrowUp,
+  ArrowDown,
+  Bookmark,
 } from "lucide-react";
 import { ImageElement } from "../types";
 
@@ -21,6 +24,8 @@ interface PdfPageNavigationProps {
   onJumpToPage: (index: number) => void;
   onRotatePage?: (pageId: string) => void;
   onDeletePage?: (pageId: string) => void;
+  onMovePage?: (fromIndex: number, toIndex: number) => void;
+  onBookmarkPage?: (pageId: string, label: string) => void;
   onAppendPdf?: (file: File) => void;
   onExportPdf?: () => void;
   onInsertBlankPage?: () => void;
@@ -35,6 +40,8 @@ export default function PdfPageNavigation({
   onJumpToPage,
   onRotatePage,
   onDeletePage,
+  onMovePage,
+  onBookmarkPage,
   onAppendPdf,
   onExportPdf,
   onInsertBlankPage,
@@ -45,6 +52,8 @@ export default function PdfPageNavigation({
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [pageInput, setPageInput] = useState<string>("");
   const [pageToDelete, setPageToDelete] = useState<{ id: string; index: number } | null>(null);
+  const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(null);
+  const [bookmarkInput, setBookmarkInput] = useState<string>("");
   const appendFileInputRef = useRef<HTMLInputElement>(null);
 
   if (pdfPages.length === 0) return null;
@@ -200,6 +209,42 @@ export default function PdfPageNavigation({
                       Page {idx + 1}
                     </span>
                     <div className="flex items-center space-x-1">
+                      {onMovePage && canWrite && idx > 0 && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onMovePage(idx, idx - 1);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-indigo-600 transition-all cursor-pointer"
+                          title="Move Page Up"
+                        >
+                          <ArrowUp className="w-3 h-3" />
+                        </button>
+                      )}
+                      {onMovePage && canWrite && idx < pdfPages.length - 1 && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onMovePage(idx, idx + 1);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-indigo-600 transition-all cursor-pointer"
+                          title="Move Page Down"
+                        >
+                          <ArrowDown className="w-3 h-3" />
+                        </button>
+                      )}
+                      {onBookmarkPage && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onBookmarkPage(page.id, `Page ${idx + 1}`);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-amber-100 rounded text-slate-500 hover:text-amber-600 transition-all cursor-pointer"
+                          title="Bookmark Page"
+                        >
+                          <Bookmark className="w-3 h-3" />
+                        </button>
+                      )}
                       {onRotatePage && canWrite && (
                         <button
                           onClick={(e) => {
