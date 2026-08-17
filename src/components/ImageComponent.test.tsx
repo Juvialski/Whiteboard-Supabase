@@ -64,4 +64,33 @@ describe('ImageComponent', () => {
     // Should be in fullscreen
     expect(screen.getByAltText('Full Resolution')).toBeTruthy();
   });
+
+  it('renders rotated PDF pages with the rotated image bounds', () => {
+    render(
+      <ImageComponent
+        {...defaultProps}
+        element={{
+          ...mockElement,
+          id: 'pdf-page-1',
+          width: 800,
+          height: 1100,
+          rotation: 90,
+        }}
+      />
+    );
+
+    const image = screen.getByAltText('PDF Page pdf-page-1') as HTMLImageElement;
+    expect(image.style.width).toBe('1100px');
+    expect(image.style.height).toBe('800px');
+    expect(image.style.transform).toBe('rotate(90deg)');
+  });
+
+  it('shows a recovery state when image data cannot be decoded', () => {
+    render(<ImageComponent {...defaultProps} />);
+
+    fireEvent.error(screen.getByAltText('Pasted canvas content'));
+
+    expect(screen.getByText('Image preview failed')).toBeTruthy();
+    expect(screen.getByText('Retry')).toBeTruthy();
+  });
 });

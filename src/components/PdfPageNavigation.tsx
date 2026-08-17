@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -16,11 +16,11 @@ import {
   ArrowDown,
   Bookmark,
 } from "lucide-react";
-import { ImageElement } from "../types";
+import { ImageElement, normalizeImageRotation } from "../types";
 import { useBoardAsset } from "../hooks/useBoardAsset";
 
 interface PdfPageNavigationProps {
-  boardId?: string;
+  boardId: string;
   pdfPages: ImageElement[];
   currentPageIndex: number;
   onJumpToPage: (index: number) => void;
@@ -37,7 +37,7 @@ interface PdfPageNavigationProps {
 }
 
 interface PdfPageThumbnailProps {
-  boardId?: string;
+  boardId: string;
   page: ImageElement;
   pageNumber: number;
   isCurrent: boolean;
@@ -50,9 +50,36 @@ function PdfPageThumbnail({ boardId, page, pageNumber, isCurrent }: PdfPageThumb
     error: assetError,
     retry: retryAsset,
   } = useBoardAsset(boardId, page.assetId, page.src);
+  const [imageLoadError, setImageLoadError] = useState(false);
+
+  useEffect(() => {
+    setImageLoadError(false);
+  }, [imageSrc]);
 
   const pageWidth = Math.max(1, page.width || 1);
   const pageHeight = Math.max(1, page.height || 1);
+  const rotation = normalizeImageRotation(page.rotation);
+  const isQuarterTurn = rotation === 90 || rotation === 270;
+  const imageStyle: React.CSSProperties = {
+    ...(isQuarterTurn ? {
+      width: `${(pageHeight / pageWidth) * 100}%`,
+      height: `${(pageWidth / pageHeight) * 100}%`,
+      maxWidth: "none",
+      maxHeight: "none",
+      flexShrink: 0,
+    } : {}),
+    ...(rotation !== 0 ? {
+      transform: `rotate(${rotation}deg)`,
+      transformOrigin: "center",
+    } : {}),
+  };
+  const canRetry = Boolean(assetError || imageLoadError);
+
+  const handleRetry = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    setImageLoadError(false);
+    retryAsset();
+  };
 
   return (
     <div
@@ -63,23 +90,23 @@ function PdfPageThumbnail({ boardId, page, pageNumber, isCurrent }: PdfPageThumb
         <div className="w-full h-full animate-pulse flex items-center justify-center text-slate-400 text-[10px]">
           Loading page...
         </div>
-      ) : imageSrc ? (
+      ) : imageSrc && !imageLoadError ? (
         <img
           src={imageSrc}
           alt={`Page ${pageNumber}`}
           className="w-full h-full object-contain"
+          style={imageStyle}
+          onError={() => setImageLoadError(true)}
+          draggable={false}
           referrerPolicy="no-referrer"
         />
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center gap-1 p-2 text-center text-rose-500 text-[10px]">
-          <span>{assetError ? "Page preview unavailable" : "No page preview"}</span>
-          {assetError && (
+          <span>{canRetry ? "Page preview unavailable" : "No page preview"}</span>
+          {canRetry && (
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                retryAsset();
-              }}
+              onClick={handleRetry}
               className="px-2 py-0.5 rounded bg-rose-100 hover:bg-rose-200 font-semibold cursor-pointer"
             >
               Retry
@@ -117,8 +144,6 @@ export default function PdfPageNavigation({
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [pageInput, setPageInput] = useState<string>("");
   const [pageToDelete, setPageToDelete] = useState<{ id: string; index: number } | null>(null);
-  const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(null);
-  const [bookmarkInput, setBookmarkInput] = useState<string>("");
   const appendFileInputRef = useRef<HTMLInputElement>(null);
 
   if (pdfPages.length === 0) return null;

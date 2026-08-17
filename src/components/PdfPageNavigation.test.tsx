@@ -35,6 +35,7 @@ describe('PdfPageNavigation', () => {
     const handleJump = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={handleJump}
@@ -49,6 +50,7 @@ describe('PdfPageNavigation', () => {
     const handleJump = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={handleJump}
@@ -64,6 +66,7 @@ describe('PdfPageNavigation', () => {
     const handleJump = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={handleJump}
@@ -80,6 +83,7 @@ describe('PdfPageNavigation', () => {
     const handleDelete = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={vi.fn()}
@@ -110,6 +114,7 @@ describe('PdfPageNavigation', () => {
     const handleRotate = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={vi.fn()}
@@ -127,6 +132,7 @@ describe('PdfPageNavigation', () => {
     const handleMove = vi.fn();
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={vi.fn()}

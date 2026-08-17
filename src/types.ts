@@ -20,6 +20,12 @@ export interface Point {
   y: number;
 }
 
+export type ImageRotation = 0 | 90 | 180 | 270;
+
+export function normalizeImageRotation(value: unknown): ImageRotation {
+  return value === 90 || value === 180 || value === 270 ? value : 0;
+}
+
 export interface ImageElement {
   id: string;
   type: "image";
@@ -29,6 +35,7 @@ export interface ImageElement {
   y: number;
   width: number;
   height: number;
+  rotation?: ImageRotation;
   src?: string; // Temporary local data URL before Storage upload
   reactions?: Record<string, string[]>; // emoji -> array of userNames
   zIndex: number;

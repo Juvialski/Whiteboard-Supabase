@@ -493,6 +493,9 @@ export function sanitizeElementForStorage(element: BoardElement): BoardElement {
   if (clean.type === 'image' && !clean.assetId && typeof clean.src === 'string' && clean.src.startsWith('blob:')) {
     throw new Error('Temporary image blob URLs cannot be persisted. Save the image as a board asset first.');
   }
+  if (clean.type === 'image' && clean.rotation !== undefined && ![0, 90, 180, 270].includes(clean.rotation)) {
+    throw new Error('Image rotation is invalid.');
+  }
   if (clean.assetId) {
     delete clean.src;
     delete clean.audioUrl;

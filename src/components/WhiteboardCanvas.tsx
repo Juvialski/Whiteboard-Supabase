@@ -45,6 +45,8 @@ import {
   MathElement,
   StampElement,
   TableElement,
+  ImageRotation,
+  normalizeImageRotation,
 } from "../types";
 
 import Toolbar, { Tool } from "./Toolbar";
@@ -1749,10 +1751,12 @@ export default function WhiteboardCanvas({
     const page = elements.find((el) => el.id === pageId) as ImageElement | undefined;
     if (!page) return;
 
+    const nextRotation = ((normalizeImageRotation(page.rotation) + 90) % 360) as ImageRotation;
     const updatedPage: ImageElement = {
       ...page,
       width: page.height,
       height: page.width,
+      rotation: nextRotation,
       updatedAt: Date.now(),
     };
 

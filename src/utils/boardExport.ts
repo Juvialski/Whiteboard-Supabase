@@ -6,6 +6,7 @@ import type {
   TableElement,
   TextElement,
 } from '../types';
+import { normalizeImageRotation } from '../types';
 import {
   getBoardAsset,
   releaseBoardAsset,
@@ -698,7 +699,22 @@ async function drawElement(
     if (source) {
       try {
         const image = await loadImage(source.src);
-        context.drawImage(image, element.x, element.y, element.width, element.height);
+        const rotation = normalizeImageRotation(element.rotation);
+        if (rotation === 90) {
+          context.translate(element.x + element.width, element.y);
+          context.rotate(Math.PI / 2);
+          context.drawImage(image, 0, 0, element.height, element.width);
+        } else if (rotation === 180) {
+          context.translate(element.x + element.width, element.y + element.height);
+          context.rotate(Math.PI);
+          context.drawImage(image, 0, 0, element.width, element.height);
+        } else if (rotation === 270) {
+          context.translate(element.x, element.y + element.height);
+          context.rotate(-Math.PI / 2);
+          context.drawImage(image, 0, 0, element.height, element.width);
+        } else {
+          context.drawImage(image, element.x, element.y, element.width, element.height);
+        }
       } catch {
         drawUnavailableImagePlaceholder(context, element.x, element.y, element.width, element.height);
       } finally {

@@ -182,6 +182,7 @@ describe('Frontend UI & Layering Automated Test Suite', () => {
 
     render(
       <PdfPageNavigation
+        boardId="board-test"
         pdfPages={mockPdfPages}
         currentPageIndex={0}
         onJumpToPage={onJumpToPage}

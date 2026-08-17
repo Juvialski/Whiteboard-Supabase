@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BoardElement, ShapeElement, TextElement } from '../types';
 import { getBoardExportBounds, renderBoardRegionToCanvas } from './boardExport';
 
@@ -18,6 +18,10 @@ describe('board export rendering', () => {
   beforeEach(() => {
     context = createContext();
     HTMLCanvasElement.prototype.getContext = vi.fn(() => context) as any;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('computes bounds for drawings and positioned elements', () => {
@@ -59,5 +63,37 @@ describe('board export rendering', () => {
     await renderBoardRegionToCanvas([text], 'board-1', { x: 0, y: 0, width: 200, height: 80 });
     expect(context.fillText).toHaveBeenCalledWith('Decorated', 4, 4);
     expect(context.stroke).toHaveBeenCalled();
+  });
+
+  it('renders rotated images using transformed canvas coordinates', async () => {
+    class MockImage {
+      decoding = 'async';
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+
+    vi.stubGlobal('Image', MockImage);
+
+    await renderBoardRegionToCanvas([
+      {
+        id: 'pdf-page-1',
+        type: 'image',
+        x: 10,
+        y: 20,
+        width: 1100,
+        height: 800,
+        rotation: 90,
+        src: 'data:image/jpeg;base64,mock',
+        zIndex: 1,
+      },
+    ], 'board-1', { x: 0, y: 0, width: 1200, height: 900 });
+
+    expect(context.translate).toHaveBeenCalledWith(1110, 20);
+    expect(context.rotate).toHaveBeenCalledWith(Math.PI / 2);
+    expect(context.drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 800, 1100);
   });
 });

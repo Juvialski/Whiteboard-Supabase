@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ImageElement, UserProfile } from '../types';
+import { ImageElement, UserProfile, normalizeImageRotation } from '../types';
 import { Smile, Trash2, Maximize2, X, Crop, Check, Lock, Unlock, Loader2, AlertCircle } from 'lucide-react';
 import { useBoardAsset } from '../hooks/useBoardAsset';
 import { saveBoardAsset } from '../services/storageService';
@@ -44,6 +44,7 @@ export default function ImageComponent({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCropping, setIsCropping] = useState(false);
   const [crop, setCrop] = useState({ top: 0, left: 0, right: 0, bottom: 0 });
+  const [imageLoadError, setImageLoadError] = useState(false);
 
   useEffect(() => {
     if (!canWrite) {
@@ -51,6 +52,10 @@ export default function ImageComponent({
       setShowEmojiPicker(false);
     }
   }, [canWrite]);
+
+  useEffect(() => {
+    setImageLoadError(false);
+  }, [imageSrc]);
 
   const handleEmojiClick = (emoji: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -193,6 +198,27 @@ export default function ImageComponent({
   const isLocked = element.locked;
 
   const isPdfPage = Boolean(element.id && typeof element.id === 'string' && element.id.startsWith('pdf-page-'));
+  const pdfRotation = isPdfPage ? normalizeImageRotation(element.rotation) : 0;
+  const isQuarterTurn = pdfRotation === 90 || pdfRotation === 270;
+  const imageStyle: React.CSSProperties = {
+    imageRendering: 'auto',
+    ...(isQuarterTurn ? {
+      width: element.height,
+      height: element.width,
+      maxWidth: 'none',
+      maxHeight: 'none',
+      flexShrink: 0,
+    } : {}),
+    ...(pdfRotation !== 0 ? {
+      transform: `rotate(${pdfRotation}deg)`,
+      transformOrigin: 'center',
+    } : {}),
+  };
+  const handleRetryImage = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    setImageLoadError(false);
+    retryAsset();
+  };
 
   return (
     <>
@@ -224,7 +250,20 @@ export default function ImageComponent({
             >
               <span>Asset load failed</span>
               <button
-                onClick={retryAsset}
+                onClick={handleRetryImage}
+                className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 rounded font-semibold text-[10px] cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          ) : imageLoadError ? (
+            <div
+              className="w-full h-full bg-rose-50 border border-rose-200 flex flex-col items-center justify-center p-2 text-rose-600 text-xs gap-1 text-center"
+              title="The image data could not be decoded."
+            >
+              <span>Image preview failed</span>
+              <button
+                onClick={handleRetryImage}
                 className="px-2 py-0.5 bg-rose-100 hover:bg-rose-200 rounded font-semibold text-[10px] cursor-pointer"
               >
                 Retry
@@ -235,7 +274,9 @@ export default function ImageComponent({
               src={imageSrc || ''}
               alt={isPdfPage ? `PDF Page ${element.id}` : 'Pasted canvas content'}
               className={`w-full h-full select-none pointer-events-none ${isPdfPage ? 'object-contain' : 'object-cover'}`}
-              style={{ imageRendering: 'auto' }}
+              style={imageStyle}
+              onError={() => setImageLoadError(true)}
+              draggable={false}
               referrerPolicy="no-referrer"
             />
           )}
@@ -274,7 +315,7 @@ export default function ImageComponent({
           )}
           
           {/* Quick full-screen preview button on hover */}
-          {!isCropping && (
+          {!isCropping && imageSrc && !imageLoadError && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -452,9 +493,11 @@ export default function ImageComponent({
               <X className="w-6 h-6" />
             </button>
             <img
-              src={element.src}
+              src={imageSrc || ''}
               alt="Full Resolution"
               className="max-w-full max-h-[80vh] rounded-lg shadow-2xl object-contain bg-neutral-900 border border-neutral-800"
+              style={pdfRotation !== 0 ? { transform: `rotate(${pdfRotation}deg)`, transformOrigin: 'center' } : undefined}
+              draggable={false}
               onClick={(e) => e.stopPropagation()} // prevent closing on image click
             />
           </div>
