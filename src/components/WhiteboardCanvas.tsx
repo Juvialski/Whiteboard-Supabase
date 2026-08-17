@@ -346,6 +346,74 @@ function translateElement(element: BoardElement, deltaX: number, deltaY: number)
     : element;
 }
 
+function getPdfPageReflowUpdates(
+  pages: ImageElement[],
+  elements: BoardElement[],
+  gap: number = 40,
+  now: number = Date.now(),
+): Map<string, { beforeData: BoardElement; afterData: BoardElement }> {
+  const positions = calculatePdfPageReflowPositions(pages, gap);
+  const positionByPageId = new Map(positions.map((position) => [position.pageId, position]));
+  const updates = new Map<string, { beforeData: BoardElement; afterData: BoardElement }>();
+
+  pages.forEach((page) => {
+    const position = positionByPageId.get(page.id);
+    if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
+
+    updates.set(page.id, {
+      beforeData: page,
+      afterData: {
+        ...page,
+        x: position.x,
+        y: position.y,
+        updatedAt: now,
+      },
+    });
+  });
+
+  // Keep annotations attached to pages that move during a reflow. Elements
+  // that are not on a remaining page are intentionally left in place.
+  elements.forEach((element) => {
+    if (element.id.startsWith("pdf-page-")) return;
+    const bounds = getElementBounds(element);
+    if (!bounds) return;
+
+    const centerX = bounds.x + bounds.width / 2;
+    const centerY = bounds.y + bounds.height / 2;
+    const owningPage = pages.find((page) => (
+      centerX >= page.x && centerX <= page.x + page.width &&
+      centerY >= page.y && centerY <= page.y + page.height
+    ));
+    if (!owningPage) return;
+
+    const position = positionByPageId.get(owningPage.id);
+    if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
+
+    updates.set(element.id, {
+      beforeData: element,
+      afterData: {
+        ...translateElement(element, position.deltaX, position.deltaY),
+        updatedAt: now,
+      },
+    });
+  });
+
+  return updates;
+}
+
+function getPdfPageLayoutKey(pages: ImageElement[]): string {
+  return pages
+    .map((page) => `${page.id}:${page.x}:${page.y}:${page.width}:${page.height}`)
+    .join("|");
+}
+
+function isLegacyEmptyPdfPage(element: BoardElement): element is ImageElement {
+  if (element.type !== "image" || !element.id.startsWith("pdf-page-")) return false;
+  const hasAsset = typeof element.assetId === "string" && element.assetId.trim().length > 0;
+  const hasInlineSource = typeof element.src === "string" && element.src.trim().length > 0;
+  return !hasAsset && !hasInlineSource;
+}
+
 interface WhiteboardCanvasProps {
   boardId: string;
   boardName: string;
@@ -393,6 +461,7 @@ export default function WhiteboardCanvas({
   const [isHydrated, setIsHydrated] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
   const isHydratedRef = useRef(false);
+  const hydratedBoardIdRef = useRef<string | null>(null);
   const [isTopBarHidden, setIsTopBarHidden] = useState(false);
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
   const [isMinimapVisible, setIsMinimapVisible] = useState(() => {
@@ -863,6 +932,8 @@ export default function WhiteboardCanvas({
   const [pendingVoiceCoords, setPendingVoiceCoords] = useState<Point | null>(null);
   const [pendingStampCoords, setPendingStampCoords] = useState<Point | null>(null);
   const [activePdfPageIndex, setActivePdfPageIndex] = useState(0);
+  const pdfLayoutRepairRef = useRef<string | null>(null);
+  const pdfLayoutRepairInProgressRef = useRef(false);
   const [incomingReaction, setIncomingReaction] = useState<FloatingReaction | null>(null);
   const [isSpotlightActive, setIsSpotlightActive] = useState(false);
   const [spotlightPos, setSpotlightPos] = useState<Point>({ x: 500, y: 300 });
@@ -1403,11 +1474,14 @@ export default function WhiteboardCanvas({
 
   // Fetch board elements in real time using boardPersistence service
   useEffect(() => {
+    hydratedBoardIdRef.current = null;
+
     if (isSandboxEnvironment()) {
       const initial = getSandboxLocalElements(boardId);
       setElements(initial);
       setIsHydrated(true);
       isHydratedRef.current = true;
+      hydratedBoardIdRef.current = boardId;
 
       const handleLocalElementsUpdate = (e: CustomEvent) => {
         if (e.detail && e.detail.boardId === boardId) {
@@ -1419,6 +1493,7 @@ export default function WhiteboardCanvas({
       window.addEventListener('lucid_spark_elements_updated', handleLocalElementsUpdate as EventListener);
       return () => {
         window.removeEventListener('lucid_spark_elements_updated', handleLocalElementsUpdate as EventListener);
+        if (hydratedBoardIdRef.current === boardId) hydratedBoardIdRef.current = null;
       };
     }
 
@@ -1447,6 +1522,7 @@ export default function WhiteboardCanvas({
           ...state.boardData,
         } as Whiteboard);
       }
+      hydratedBoardIdRef.current = boardId;
       setHydrationError(null);
       setIsHydrated(true);
       isHydratedRef.current = true;
@@ -1454,6 +1530,7 @@ export default function WhiteboardCanvas({
 
     return () => {
       unsubscribe();
+      if (hydratedBoardIdRef.current === boardId) hydratedBoardIdRef.current = null;
     };
   }, [boardId]);
 
@@ -1736,6 +1813,88 @@ export default function WhiteboardCanvas({
     setSyncStatus('saved-local');
   }, [boardId, setElements, setSyncStatus, triggerReadOnlyAlert]);
 
+  // Boards created before PDF deletion compacting can still contain a large
+  // gap where a removed page used to be. Some older deletes also left behind
+  // a source-less pdf-page element, which renders as a blank white page. Repair
+  // both cases once when the board is opened, and persist the correction for
+  // writers.
+  useEffect(() => {
+    if (!isHydrated || pdfPages.length === 0) return;
+    if (hydratedBoardIdRef.current !== boardId) return;
+    if (!isSandboxEnvironment() && !boardData) return;
+    if (pdfLayoutRepairInProgressRef.current) return;
+
+    const layoutKey = getPdfPageLayoutKey(pdfPages);
+    if (pdfLayoutRepairRef.current === layoutKey) return;
+
+    const legacyEmptyPageIds = new Set(
+      elements.filter(isLegacyEmptyPdfPage).map((page) => page.id),
+    );
+    const remainingPages = pdfPages.filter((page) => !legacyEmptyPageIds.has(page.id));
+    const updates = getPdfPageReflowUpdates(remainingPages, elements);
+    pdfLayoutRepairRef.current = layoutKey;
+    if (updates.size === 0 && legacyEmptyPageIds.size === 0) return;
+
+    const repairedElements = elements
+      .filter((element) => !legacyEmptyPageIds.has(element.id))
+      .map((element) => updates.get(element.id)?.afterData || element);
+    const repairedPages = remainingPages.map((page) => updates.get(page.id)?.afterData as ImageElement || page);
+    const repairedLayoutKey = getPdfPageLayoutKey(repairedPages);
+    setActivePdfPageIndex((previousIndex) => {
+      const removedBeforeCurrent = pdfPages
+        .slice(0, previousIndex)
+        .filter((page) => legacyEmptyPageIds.has(page.id)).length;
+      if (remainingPages.length === 0) return 0;
+      return Math.max(0, Math.min(previousIndex - removedBeforeCurrent, remainingPages.length - 1));
+    });
+    pdfLayoutRepairInProgressRef.current = true;
+
+    const repair = async () => {
+      try {
+        if (!isSandboxEnvironment() && !canWrite) {
+          setElements(repairedElements);
+          elementsRef.current = repairedElements;
+          showSyncToast(
+            legacyEmptyPageIds.size > 0
+              ? "Legacy blank PDF page removed for this view"
+              : "Legacy PDF page spacing repaired for this view",
+            "info",
+          );
+          return;
+        }
+
+        // Apply the full repair atomically in this tab before queuing each
+        // durable mutation. This prevents the hydration effect from starting
+        // another repair while the individual mutations are being persisted.
+        setElements(repairedElements);
+        elementsRef.current = repairedElements;
+        for (const pageId of legacyEmptyPageIds) {
+          await saveElementLocallyAndSync(pageId, undefined, false, "delete");
+        }
+        for (const { afterData } of updates.values()) {
+          await saveElementLocallyAndSync(afterData.id, afterData);
+        }
+        showSyncToast(
+          legacyEmptyPageIds.size > 0
+            ? "Legacy blank PDF page removed and PDF layout repaired"
+            : "Legacy PDF page spacing repaired",
+          "success",
+        );
+      } catch (error) {
+        pdfLayoutRepairRef.current = null;
+        console.error("Error repairing legacy PDF page spacing:", error);
+        showSyncToast("Failed to repair PDF page spacing", "error");
+      } finally {
+        if (pdfLayoutRepairRef.current !== null) {
+          pdfLayoutRepairRef.current = repairedLayoutKey;
+        }
+        pdfLayoutRepairInProgressRef.current = false;
+      }
+    };
+
+    void repair();
+  }, [boardData, boardId, canWrite, elements, isHydrated, pdfPages, saveElementLocallyAndSync, showSyncToast]);
+
   const handleInsertBlankPdfPage = React.useCallback(() => {
     const lastPage = pdfPages[pdfPages.length - 1];
     const newY = lastPage ? lastPage.y + lastPage.height + 40 : 0;
@@ -1836,51 +1995,11 @@ export default function WhiteboardCanvas({
     if (!page) return;
 
     const remainingPages = pdfPages.filter((candidate) => candidate.id !== pageId);
-    const reflowPositions = calculatePdfPageReflowPositions(remainingPages, 40);
-    const reflowByPageId = new Map(reflowPositions.map((position) => [position.pageId, position]));
     const now = Date.now();
     const undoActions: ElementUndoAction[] = [
       { type: 'delete', elementId: pageId, beforeData: page },
     ];
-    const updates = new Map<string, { beforeData: BoardElement; afterData: BoardElement }>();
-
-    remainingPages.forEach((remainingPage) => {
-      const position = reflowByPageId.get(remainingPage.id);
-      if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
-      const afterData = {
-        ...remainingPage,
-        x: position.x,
-        y: position.y,
-        updatedAt: now,
-      } as BoardElement;
-      updates.set(remainingPage.id, { beforeData: remainingPage, afterData });
-    });
-
-    // Keep annotations attached to pages that move during the reflow. Content
-    // on the deleted page intentionally remains where it was, matching the
-    // delete confirmation message in the page drawer.
-    elements.forEach((element) => {
-      if (element.id === pageId || element.id.startsWith("pdf-page-")) return;
-      const bounds = getElementBounds(element);
-      if (!bounds) return;
-
-      const centerX = bounds.x + bounds.width / 2;
-      const centerY = bounds.y + bounds.height / 2;
-      const owningPage = remainingPages.find((candidate) => (
-        centerX >= candidate.x && centerX <= candidate.x + candidate.width &&
-        centerY >= candidate.y && centerY <= candidate.y + candidate.height
-      ));
-      if (!owningPage) return;
-
-      const position = reflowByPageId.get(owningPage.id);
-      if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
-
-      const afterData = {
-        ...translateElement(element, position.deltaX, position.deltaY),
-        updatedAt: now,
-      } as BoardElement;
-      updates.set(element.id, { beforeData: element, afterData });
-    });
+    const updates = getPdfPageReflowUpdates(remainingPages, elements, 40, now);
 
     updates.forEach(({ beforeData, afterData }) => {
       undoActions.push({

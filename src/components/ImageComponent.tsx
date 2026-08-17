@@ -269,6 +269,13 @@ export default function ImageComponent({
                 Retry
               </button>
             </div>
+          ) : !imageSrc ? (
+            <div
+              className="w-full h-full bg-rose-50 border border-rose-200 flex items-center justify-center p-2 text-rose-600 text-xs text-center"
+              title="This image has no saved source."
+            >
+              Image source unavailable
+            </div>
           ) : (
             <img
               src={imageSrc || ''}

@@ -93,4 +93,16 @@ describe('ImageComponent', () => {
     expect(screen.getByText('Image preview failed')).toBeTruthy();
     expect(screen.getByText('Retry')).toBeTruthy();
   });
+
+  it('does not render a blank rectangle when an image has no source', () => {
+    render(
+      <ImageComponent
+        {...defaultProps}
+        element={{ ...mockElement, src: undefined }}
+      />
+    );
+
+    expect(screen.getByText('Image source unavailable')).toBeTruthy();
+    expect(screen.queryByAltText('Pasted canvas content')).toBeNull();
+  });
 });
