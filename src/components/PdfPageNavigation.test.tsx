@@ -1,8 +1,16 @@
 ﻿import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import PdfPageNavigation from './PdfPageNavigation';
 import type { ImageElement } from '../types';
+
+const assetMocks = vi.hoisted(() => ({
+  useBoardAsset: vi.fn(),
+}));
+
+vi.mock('../hooks/useBoardAsset', () => ({
+  useBoardAsset: assetMocks.useBoardAsset,
+}));
 
 const mockPdfPages: ImageElement[] = [
   { id: 'pdf-page-0-1', type: 'image', x: 0, y: 0, width: 800, height: 1100, src: 'data:image/jpeg;base64,page1', zIndex: 1 },
@@ -10,6 +18,19 @@ const mockPdfPages: ImageElement[] = [
 ];
 
 describe('PdfPageNavigation', () => {
+  beforeEach(() => {
+    assetMocks.useBoardAsset.mockImplementation((
+      _boardId: string | undefined,
+      _assetId: string | undefined,
+      fallbackInlineData?: string,
+    ) => ({
+      data: fallbackInlineData || null,
+      loading: false,
+      error: null,
+      retry: vi.fn(),
+    }));
+  });
+
   it('renders page navigation controls and drawer button', () => {
     const handleJump = vi.fn();
     render(
@@ -121,5 +142,33 @@ describe('PdfPageNavigation', () => {
     const moveDownBtn = screen.getByTitle(/move page down/i);
     fireEvent.click(moveDownBtn);
     expect(handleMove).toHaveBeenCalledWith(0, 1);
+  });
+
+  it('resolves storage-backed page previews with board context', () => {
+    const storagePreview = 'data:image/jpeg;base64,from-storage';
+    assetMocks.useBoardAsset.mockReturnValue({
+      data: storagePreview,
+      loading: false,
+      error: null,
+      retry: vi.fn(),
+    });
+
+    render(
+      <PdfPageNavigation
+        boardId="board-1"
+        pdfPages={[{
+          ...mockPdfPages[0],
+          src: undefined,
+          assetId: 'asset-page-1',
+        }]}
+        currentPageIndex={0}
+        onJumpToPage={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByTitle(/toggle pdf page drawer/i));
+
+    expect(screen.getByAltText('Page 1').getAttribute('src')).toBe(storagePreview);
+    expect(assetMocks.useBoardAsset).toHaveBeenCalledWith('board-1', 'asset-page-1', undefined);
   });
 });

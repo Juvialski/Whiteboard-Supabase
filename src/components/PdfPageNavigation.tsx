@@ -17,8 +17,10 @@ import {
   Bookmark,
 } from "lucide-react";
 import { ImageElement } from "../types";
+import { useBoardAsset } from "../hooks/useBoardAsset";
 
 interface PdfPageNavigationProps {
+  boardId?: string;
   pdfPages: ImageElement[];
   currentPageIndex: number;
   onJumpToPage: (index: number) => void;
@@ -34,7 +36,70 @@ interface PdfPageNavigationProps {
   canWrite?: boolean;
 }
 
+interface PdfPageThumbnailProps {
+  boardId?: string;
+  page: ImageElement;
+  pageNumber: number;
+  isCurrent: boolean;
+}
+
+function PdfPageThumbnail({ boardId, page, pageNumber, isCurrent }: PdfPageThumbnailProps) {
+  const {
+    data: imageSrc,
+    loading: isLoading,
+    error: assetError,
+    retry: retryAsset,
+  } = useBoardAsset(boardId, page.assetId, page.src);
+
+  const pageWidth = Math.max(1, page.width || 1);
+  const pageHeight = Math.max(1, page.height || 1);
+
+  return (
+    <div
+      className="relative w-full bg-slate-100 rounded-xl overflow-hidden border border-slate-200/60 flex items-center justify-center"
+      style={{ aspectRatio: `${pageWidth} / ${pageHeight}` }}
+    >
+      {isLoading ? (
+        <div className="w-full h-full animate-pulse flex items-center justify-center text-slate-400 text-[10px]">
+          Loading page...
+        </div>
+      ) : imageSrc ? (
+        <img
+          src={imageSrc}
+          alt={`Page ${pageNumber}`}
+          className="w-full h-full object-contain"
+          referrerPolicy="no-referrer"
+        />
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-1 p-2 text-center text-rose-500 text-[10px]">
+          <span>{assetError ? "Page preview unavailable" : "No page preview"}</span>
+          {assetError && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                retryAsset();
+              }}
+              className="px-2 py-0.5 rounded bg-rose-100 hover:bg-rose-200 font-semibold cursor-pointer"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+      {isCurrent && (
+        <div className="absolute inset-0 bg-indigo-600/10 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+          <span className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-xs">
+            Active
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PdfPageNavigation({
+  boardId,
   pdfPages,
   currentPageIndex,
   onJumpToPage,
@@ -272,21 +337,12 @@ export default function PdfPageNavigation({
                     </div>
                   </div>
 
-                  {/* Thumbnail Image */}
-                  <div className="relative aspect-[3/4] bg-slate-100 rounded-xl overflow-hidden border border-slate-200/60 flex items-center justify-center">
-                    <img
-                      src={page.src}
-                      alt={`Page ${idx + 1}`}
-                      className="w-full h-full object-contain"
-                    />
-                    {isCurrent && (
-                      <div className="absolute inset-0 bg-indigo-600/10 backdrop-blur-[1px] flex items-center justify-center">
-                        <span className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-xs">
-                          Active
-                        </span>
-                      </div>
-                    )}
-                  </div>
+                  <PdfPageThumbnail
+                    boardId={boardId}
+                    page={page}
+                    pageNumber={idx + 1}
+                    isCurrent={isCurrent}
+                  />
                 </div>
               );
             })}

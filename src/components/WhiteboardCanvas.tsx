@@ -19,7 +19,6 @@ import {
   type BoardSocketHandle,
 } from "../services/boardSocketService";
 import { createSecureBoardShareLink } from "../services/shareLinkService";
-import { recognizeShape } from "../utils/shapeRecognition";
 import LiveReactions, { FloatingReaction } from "./LiveReactions";
 import SpotlightOverlay from "./SpotlightOverlay";
 import { exportSelectionImage } from "../utils/boardExport";
@@ -3022,34 +3021,6 @@ export default function WhiteboardCanvas({
           ? [points[0], { x: points[0].x + 0.1, y: points[0].y + 0.1 }]
           : points;
 
-        // Smart shape auto-snap for geometric primitives drawn with pencil
-        const recognized = activeTool === "pencil" && finalPoints.length >= 6 ? recognizeShape(finalPoints) : null;
-        if (recognized) {
-          const shapeId = "shape-" + Date.now() + Math.floor(Math.random() * 100);
-          const newShape: ShapeElement = {
-            id: shapeId,
-            type: "shape",
-            shapeType: recognized.type,
-            x: recognized.x,
-            y: recognized.y,
-            width: recognized.width,
-            height: recognized.height,
-            text: "",
-            color: "transparent",
-            borderColor: activeColor,
-            zIndex: elements.length + 1,
-          };
-          try {
-            await saveElementLocallyAndSync(shapeId, newShape);
-            pushToUndo({ type: "add", elementId: shapeId, afterData: newShape });
-          } catch (err) {
-            console.error("Error saving recognized shape:", err);
-          }
-          drawingPointsRef.current = [];
-          if (localDrawingPathRef.current) localDrawingPathRef.current.setAttribute("d", "");
-          return;
-        }
-
         const id = "draw-" + Date.now() + Math.floor(Math.random() * 100);
         const isHighlighter = activeTool === "highlighter";
         const newStroke: DrawingElement = {
@@ -4485,6 +4456,7 @@ export default function WhiteboardCanvas({
       {/* Kami Page Navigation Bar for PDF boards */}
       {isPdfBoard && pdfPages.length > 0 && (
         <PdfPageNavigation
+          boardId={boardId}
           pdfPages={pdfPages}
           currentPageIndex={activePdfPageIndex}
           onJumpToPage={handleJumpToPdfPage}
