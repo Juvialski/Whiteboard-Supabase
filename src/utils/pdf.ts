@@ -136,6 +136,45 @@ export function calculateNextPdfPagePositions(
   }
 }
 
+export interface PdfPageReflowPosition {
+  pageId: string;
+  x: number;
+  y: number;
+  deltaX: number;
+  deltaY: number;
+}
+
+/**
+ * Calculates compact positions for an existing PDF page sequence after a page
+ * is removed. The first remaining page stays anchored and the original board
+ * orientation is preserved.
+ */
+export function calculatePdfPageReflowPositions(
+  pages: ImageElement[],
+  gap: number = 40,
+): PdfPageReflowPosition[] {
+  if (pages.length === 0) return [];
+
+  const firstPage = pages[0];
+  const isHorizontal = pages.length >= 2 &&
+    Math.abs(pages[1].x - firstPage.x) > Math.abs(pages[1].y - firstPage.y);
+  let cursor = isHorizontal ? firstPage.x : firstPage.y;
+
+  return pages.map((page) => {
+    const x = isHorizontal ? cursor : firstPage.x;
+    const y = isHorizontal ? firstPage.y : cursor;
+    const position = {
+      pageId: page.id,
+      x,
+      y,
+      deltaX: x - page.x,
+      deltaY: y - page.y,
+    };
+    cursor += (isHorizontal ? page.width : page.height) + gap;
+    return position;
+  });
+}
+
 export async function exportPdfWithDrawings(
   elements: BoardElement[],
   boardName: string,

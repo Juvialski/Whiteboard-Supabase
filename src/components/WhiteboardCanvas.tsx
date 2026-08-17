@@ -111,7 +111,7 @@ import {
 } from "lucide-react";
 import Markdown from "react-markdown";
 import WorkspaceTimer from "./WorkspaceTimer";
-import { exportPdfWithDrawings } from "../utils/pdf";
+import { calculatePdfPageReflowPositions, exportPdfWithDrawings } from "../utils/pdf";
 import { exportBoardImage } from "../utils/boardExport";
 import { sampleRealtimeDrawingPoints } from "../utils/realtimeDrawing";
 
@@ -287,6 +287,63 @@ function simplifyPoints(points: Point[], tolerance: number = 1.0): Point[] {
   }
   result.push(points[points.length - 1]);
   return result;
+}
+
+interface ElementBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function getElementBounds(element: BoardElement): ElementBounds | null {
+  if (element.type === "drawing") {
+    if (element.points.length === 0) return null;
+    const xs = element.points.map((point) => point.x);
+    const ys = element.points.map((point) => point.y);
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    };
+  }
+
+  if (element.type === "connector") {
+    return element.endPoint
+      ? { x: element.endPoint.x, y: element.endPoint.y, width: 0, height: 0 }
+      : null;
+  }
+
+  const bounded = element as BoardElement & { x?: number; y?: number; width?: number; height?: number };
+  if (typeof bounded.x !== "number" || typeof bounded.y !== "number") return null;
+
+  return {
+    x: bounded.x,
+    y: bounded.y,
+    width: typeof bounded.width === "number" ? bounded.width : (element.type === "audio" ? 280 : 0),
+    height: typeof bounded.height === "number" ? bounded.height : (element.type === "audio" ? 72 : 0),
+  };
+}
+
+function translateElement(element: BoardElement, deltaX: number, deltaY: number): BoardElement {
+  if (element.type === "drawing") {
+    return {
+      ...element,
+      points: element.points.map((point) => ({ x: point.x + deltaX, y: point.y + deltaY })),
+    };
+  }
+
+  if (element.type === "connector") {
+    return element.endPoint
+      ? { ...element, endPoint: { x: element.endPoint.x + deltaX, y: element.endPoint.y + deltaY } }
+      : element;
+  }
+
+  const bounded = element as BoardElement & { x?: number; y?: number };
+  return typeof bounded.x === "number" && typeof bounded.y === "number"
+    ? { ...element, x: bounded.x + deltaX, y: bounded.y + deltaY } as BoardElement
+    : element;
 }
 
 interface WhiteboardCanvasProps {
@@ -743,12 +800,17 @@ export default function WhiteboardCanvas({
   );
 
   // Undo History state
-  interface UndoAction {
+  interface ElementUndoAction {
     type: "add" | "delete" | "update";
     elementId: string;
     beforeData?: any;
     afterData?: any;
   }
+  interface UndoBatchAction {
+    type: "batch";
+    actions: ElementUndoAction[];
+  }
+  type UndoAction = ElementUndoAction | UndoBatchAction;
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
 
@@ -1765,7 +1827,7 @@ export default function WhiteboardCanvas({
     showSyncToast("Page rotated", "success");
   }, [canWrite, elements, pushToUndo, saveElementLocallyAndSync, showSyncToast, triggerReadOnlyAlert]);
 
-  const handleDeletePdfPage = React.useCallback((pageId: string) => {
+  const handleDeletePdfPage = React.useCallback(async (pageId: string) => {
     if (!canWrite) {
       triggerReadOnlyAlert();
       return;
@@ -1773,16 +1835,82 @@ export default function WhiteboardCanvas({
     const page = elements.find((el) => el.id === pageId);
     if (!page) return;
 
-    saveElementLocallyAndSync(pageId, undefined, false, 'delete');
-    pushToUndo({ type: 'delete', elementId: pageId, beforeData: page });
+    const remainingPages = pdfPages.filter((candidate) => candidate.id !== pageId);
+    const reflowPositions = calculatePdfPageReflowPositions(remainingPages, 40);
+    const reflowByPageId = new Map(reflowPositions.map((position) => [position.pageId, position]));
+    const now = Date.now();
+    const undoActions: ElementUndoAction[] = [
+      { type: 'delete', elementId: pageId, beforeData: page },
+    ];
+    const updates = new Map<string, { beforeData: BoardElement; afterData: BoardElement }>();
 
-    setActivePdfPageIndex((prev) => {
-      const remaining = pdfPages.filter((p) => p.id !== pageId);
-      if (remaining.length === 0) return 0;
-      return Math.min(prev, remaining.length - 1);
+    remainingPages.forEach((remainingPage) => {
+      const position = reflowByPageId.get(remainingPage.id);
+      if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
+      const afterData = {
+        ...remainingPage,
+        x: position.x,
+        y: position.y,
+        updatedAt: now,
+      } as BoardElement;
+      updates.set(remainingPage.id, { beforeData: remainingPage, afterData });
     });
 
-    showSyncToast("PDF page removed", "success");
+    // Keep annotations attached to pages that move during the reflow. Content
+    // on the deleted page intentionally remains where it was, matching the
+    // delete confirmation message in the page drawer.
+    elements.forEach((element) => {
+      if (element.id === pageId || element.id.startsWith("pdf-page-")) return;
+      const bounds = getElementBounds(element);
+      if (!bounds) return;
+
+      const centerX = bounds.x + bounds.width / 2;
+      const centerY = bounds.y + bounds.height / 2;
+      const owningPage = remainingPages.find((candidate) => (
+        centerX >= candidate.x && centerX <= candidate.x + candidate.width &&
+        centerY >= candidate.y && centerY <= candidate.y + candidate.height
+      ));
+      if (!owningPage) return;
+
+      const position = reflowByPageId.get(owningPage.id);
+      if (!position || (position.deltaX === 0 && position.deltaY === 0)) return;
+
+      const afterData = {
+        ...translateElement(element, position.deltaX, position.deltaY),
+        updatedAt: now,
+      } as BoardElement;
+      updates.set(element.id, { beforeData: element, afterData });
+    });
+
+    updates.forEach(({ beforeData, afterData }) => {
+      undoActions.push({
+        type: 'update',
+        elementId: afterData.id,
+        beforeData,
+        afterData,
+      });
+    });
+
+    try {
+      await Promise.all([
+        saveElementLocallyAndSync(pageId, undefined, false, 'delete'),
+        ...Array.from(updates.values(), ({ afterData }) => saveElementLocallyAndSync(afterData.id, afterData)),
+      ]);
+      pushToUndo({ type: 'batch', actions: undoActions });
+    } catch (err) {
+      console.error("Error removing PDF page and compacting remaining pages:", err);
+      showSyncToast("Failed to remove PDF page", "error");
+      return;
+    }
+
+    const deletedIndex = pdfPages.findIndex((candidate) => candidate.id === pageId);
+    setActivePdfPageIndex((previousIndex) => {
+      if (remainingPages.length === 0) return 0;
+      if (previousIndex > deletedIndex) return previousIndex - 1;
+      return Math.min(previousIndex, remainingPages.length - 1);
+    });
+
+    showSyncToast(updates.size > 0 ? "PDF page removed and pages compacted" : "PDF page removed", "success");
   }, [canWrite, elements, pdfPages, pushToUndo, saveElementLocallyAndSync, showSyncToast, triggerReadOnlyAlert]);
 
   const handleAppendPdf = React.useCallback(async (file: File) => {
@@ -3187,6 +3315,32 @@ export default function WhiteboardCanvas({
       .catch((err) => console.error("Error deleting element:", err));
   }, [pushToUndo, saveElementLocallyAndSync, setSelectedId, setSelectedIds]);
 
+  const applyUndoAction = async (action: UndoAction, direction: "undo" | "redo") => {
+    const actions = action.type === "batch"
+      ? direction === "undo" ? [...action.actions].reverse() : action.actions
+      : [action];
+
+    for (const item of actions) {
+      if (direction === "undo") {
+        if (item.type === "add") {
+          await saveElementLocallyAndSync(item.elementId, null, false, 'delete');
+          if (selectedId === item.elementId) setSelectedId(null);
+        } else if (item.type === "delete") {
+          if (item.beforeData) await saveElementLocallyAndSync(item.elementId, item.beforeData);
+        } else if (item.beforeData) {
+          await saveElementLocallyAndSync(item.elementId, item.beforeData, true);
+        }
+      } else if (item.type === "add") {
+        if (item.afterData) await saveElementLocallyAndSync(item.elementId, item.afterData);
+      } else if (item.type === "delete") {
+        await saveElementLocallyAndSync(item.elementId, null, false, 'delete');
+        if (selectedId === item.elementId) setSelectedId(null);
+      } else if (item.afterData) {
+        await saveElementLocallyAndSync(item.elementId, item.afterData, true);
+      }
+    }
+  };
+
   // Undo the last action from the local stack
   const handleUndo = async () => {
     if (undoStack.length === 0) return;
@@ -3196,20 +3350,7 @@ export default function WhiteboardCanvas({
     setRedoStack((prev) => [...prev, action]);
 
     try {
-      if (action.type === "add") {
-        await saveElementLocallyAndSync(action.elementId, null, false, 'delete');
-        if (selectedId === action.elementId) {
-          setSelectedId(null);
-        }
-      } else if (action.type === "delete") {
-        if (action.beforeData) {
-          await saveElementLocallyAndSync(action.elementId, action.beforeData);
-        }
-      } else if (action.type === "update") {
-        if (action.beforeData) {
-          await saveElementLocallyAndSync(action.elementId, action.beforeData, true);
-        }
-      }
+      await applyUndoAction(action, "undo");
     } catch (err) {
       console.error("Error executing undo:", err);
     }
@@ -3224,20 +3365,7 @@ export default function WhiteboardCanvas({
     setUndoStack((prev) => [...prev, action]);
 
     try {
-      if (action.type === "add") {
-        if (action.afterData) {
-          await saveElementLocallyAndSync(action.elementId, action.afterData);
-        }
-      } else if (action.type === "delete") {
-        await saveElementLocallyAndSync(action.elementId, null, false, 'delete');
-        if (selectedId === action.elementId) {
-          setSelectedId(null);
-        }
-      } else if (action.type === "update") {
-        if (action.afterData) {
-          await saveElementLocallyAndSync(action.elementId, action.afterData, true);
-        }
-      }
+      await applyUndoAction(action, "redo");
     } catch (err) {
       console.error("Error executing redo:", err);
     }

@@ -36,6 +36,7 @@ vi.mock('jspdf', () => {
 
 import {
   calculateNextPdfPagePositions,
+  calculatePdfPageReflowPositions,
   exportPdfWithDrawings,
   MAX_PDF_FILE_BYTES,
   MAX_PDF_PAGES,
@@ -87,6 +88,30 @@ describe('pdf utilities', () => {
     expect(positions).toEqual([
       { x: 0, y: 2080 },
       { x: 0, y: 3120 },
+    ]);
+  });
+
+  it('compacts remaining vertical pages after a page is removed', () => {
+    const pages: any[] = [
+      { id: 'pdf-page-0-1', type: 'image', x: 0, y: 0, width: 800, height: 1000 },
+      { id: 'pdf-page-2-3', type: 'image', x: 0, y: 2080, width: 800, height: 1000 },
+    ];
+
+    expect(calculatePdfPageReflowPositions(pages, 40)).toEqual([
+      { pageId: 'pdf-page-0-1', x: 0, y: 0, deltaX: 0, deltaY: 0 },
+      { pageId: 'pdf-page-2-3', x: 0, y: 1040, deltaX: 0, deltaY: -1040 },
+    ]);
+  });
+
+  it('compacts remaining horizontal pages after a page is removed', () => {
+    const pages: any[] = [
+      { id: 'pdf-page-0-1', type: 'image', x: 100, y: 200, width: 800, height: 1000 },
+      { id: 'pdf-page-2-3', type: 'image', x: 1940, y: 200, width: 800, height: 1000 },
+    ];
+
+    expect(calculatePdfPageReflowPositions(pages, 40)).toEqual([
+      { pageId: 'pdf-page-0-1', x: 100, y: 200, deltaX: 0, deltaY: 0 },
+      { pageId: 'pdf-page-2-3', x: 940, y: 200, deltaX: -1000, deltaY: 0 },
     ]);
   });
 
