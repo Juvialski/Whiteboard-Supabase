@@ -697,6 +697,7 @@ export default function WhiteboardCanvas({
           if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
           else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
         } else if (msg.type === "emoji_reaction") {
+          if (msg.userId === currentUser.id) return;
           setIncomingReaction({
             id: msg.id || `remote-${Date.now()}-${Math.random()}`,
             emoji: msg.emoji,
@@ -4646,21 +4647,32 @@ export default function WhiteboardCanvas({
         onStopFollow={() => setFollowedUserId(null)}
       />
 
-      {/* Minimap Navigation Control */}
-      {!isZenMode && isMinimapVisible && (
-        <div className="fixed bottom-16 sm:bottom-5 right-3 sm:right-5 z-30 flex flex-col items-end space-y-2">
-          <Minimap
-            elements={elements}
-            panX={panX}
-            panY={panY}
-            zoom={zoom}
-            containerWidth={containerDimensions.width}
-            containerHeight={containerDimensions.height}
-            onPanTo={(newPanX, newPanY) => {
-              setPanX(newPanX);
-              setPanY(newPanY);
-            }}
-          />
+      {/* Bottom Right Overlay Controls (Minimap & Live Reactions) */}
+      {!isZenMode && (
+        <div className="fixed bottom-16 sm:bottom-5 right-3 sm:right-5 z-30 flex flex-col items-end space-y-2 pointer-events-none">
+          {isMinimapVisible && (
+            <div className="pointer-events-auto">
+              <Minimap
+                elements={elements}
+                panX={panX}
+                panY={panY}
+                zoom={zoom}
+                containerWidth={containerDimensions.width}
+                containerHeight={containerDimensions.height}
+                onPanTo={(newPanX, newPanY) => {
+                  setPanX(newPanX);
+                  setPanY(newPanY);
+                }}
+              />
+            </div>
+          )}
+
+          <div className="pointer-events-auto">
+            <LiveReactions
+              onSendReaction={handleSendReaction}
+              incomingReaction={incomingReaction}
+            />
+          </div>
         </div>
       )}
 
@@ -4722,12 +4734,6 @@ export default function WhiteboardCanvas({
           canWrite={canWrite}
         />
       )}
-
-      {/* Live Reactions Emoji Floating Overlay */}
-      <LiveReactions
-        onSendReaction={handleSendReaction}
-        incomingReaction={incomingReaction}
-      />
 
       {/* Presenter Focus Spotlight Beam */}
       <SpotlightOverlay

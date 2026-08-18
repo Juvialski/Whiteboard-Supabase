@@ -210,7 +210,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
       }`}
     >
       {/* Board / history controls */}
-      <div className="pointer-events-auto min-w-0 max-w-[calc(100vw-126px)] sm:max-w-[70vw] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md p-1 flex items-center gap-0.5 sm:gap-1 touch-manipulation">
+      <div className="pointer-events-auto min-w-0 max-w-[55vw] sm:max-w-[70vw] bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/80 shadow-md p-1 flex items-center gap-0.5 sm:gap-1 touch-manipulation">
         <button
           onClick={onBackToDashboard}
           className="min-w-[36px] min-h-[36px] p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 active:bg-slate-200 transition-colors flex items-center justify-center gap-1 text-xs font-bold shrink-0"
@@ -262,7 +262,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           ) : (
             <div className="flex items-center gap-1 group/title min-w-0">
               <span
-                className="truncate max-w-[88px] sm:max-w-[150px] lg:max-w-[220px] text-xs sm:text-sm font-semibold text-slate-900"
+                className="truncate max-w-[75px] xs:max-w-[120px] sm:max-w-[150px] lg:max-w-[220px] text-xs sm:text-sm font-semibold text-slate-900"
                 title={boardName}
               >
                 {boardName}

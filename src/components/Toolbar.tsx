@@ -771,7 +771,7 @@ export default function Toolbar({
           <div
             onMouseEnter={cancelAutoHideTimer}
             onMouseLeave={resetAutoHideTimer}
-            className={`bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 shadow-xl p-3.5 flex flex-col space-y-3.5 absolute transition-all duration-200 z-40 w-[94vw] max-w-[280px] animate-fade-in ${
+            className={`bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 shadow-xl p-3.5 flex flex-col space-y-3.5 absolute transition-all duration-200 z-40 w-[94vw] max-w-[280px] max-h-[70vh] overflow-y-auto animate-fade-in ${
               isCollapsed
                 ? "bottom-16 left-1/2 -translate-x-1/2 md:bottom-auto md:left-24 md:top-10 md:translate-x-0"
                 : "bottom-20 left-1/2 -translate-x-1/2 md:bottom-auto md:left-24 md:top-10 md:translate-x-0"

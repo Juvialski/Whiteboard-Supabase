@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Smile, Sparkles } from 'lucide-react';
 
 export interface FloatingReaction {
@@ -14,11 +14,12 @@ export interface FloatingReaction {
 interface LiveReactionsProps {
   onSendReaction: (emoji: string) => void;
   incomingReaction?: FloatingReaction | null;
+  className?: string;
 }
 
 export const EMOJI_OPTIONS = ['👍', '❤️', '💡', '👏', '🙋‍♂️', '🎯', '🚀', '⭐'];
 
-export default function LiveReactions({ onSendReaction, incomingReaction }: LiveReactionsProps) {
+export default function LiveReactions({ onSendReaction, incomingReaction, className }: LiveReactionsProps) {
   const [reactions, setReactions] = useState<FloatingReaction[]>([]);
   const [isOpen, setIsOpen] = useState(false);
 
@@ -92,9 +93,9 @@ export default function LiveReactions({ onSendReaction, incomingReaction }: Live
       </div>
 
       {/* Floating Reaction Launcher */}
-      <div className="fixed bottom-6 right-6 z-30 flex items-center space-x-1.5">
+      <div className={`flex items-center space-x-1.5 ${className || ''}`}>
         {isOpen && (
-          <div className="bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-2xl rounded-2xl p-1.5 flex items-center space-x-1 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-2xl rounded-2xl p-1 sm:p-1.5 flex items-center space-x-1 max-w-[calc(100vw-4.5rem)] overflow-x-auto scrollbar-none animate-in fade-in zoom-in-95 duration-150">
             {EMOJI_OPTIONS.map((emoji) => (
               <button
                 key={emoji}

@@ -43,14 +43,14 @@ const SHAPES = new Set([
 ]);
 const BOARD_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
 const USER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "ping"]);
+const VIEWER_EVENTS = new Set(["cursor", "laser_point", "element_focus", "emoji_reaction", "ping"]);
 const WRITER_EVENTS = new Set([
   ...VIEWER_EVENTS,
   "drawing_stream", "drawing_stream_end", "element_update", "timer_sync",
   "request_follow", "stop_follow", "board_manifest_changed", "board_settings_changed",
   "member_permission_changed",
 ]);
-const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus"]);
+const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus", "emoji_reaction"]);
 const MAX_ROOM_CLIENTS = 20;
 const MAX_CONNECTIONS_PER_IP = 12;
 const MAX_USER_CONNECTIONS_PER_ROOM = 4;
@@ -377,7 +377,7 @@ function consumeSocketRate(context: SocketContext, type: string): boolean {
     cursor: 300, laser_point: 600, drawing_stream: 300, element_focus: 30,
     element_update: 120, drawing_stream_end: 60, board_manifest_changed: 12,
     timer_sync: 15, request_follow: 10, stop_follow: 10, board_settings_changed: 6,
-    member_permission_changed: 20, ping: 10,
+    member_permission_changed: 20, emoji_reaction: 30, ping: 10,
   };
   const max = limits[type] ?? 30;
   const now = Date.now();
@@ -408,6 +408,16 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
     case "element_focus":
       if (!Array.isArray(message.selectedIds) || message.selectedIds.length > 100 || !message.selectedIds.every((id: unknown) => typeof id === "string" && id.length <= 128)) return null;
       return { ...common, userName: cleanText(message.userName, 60, "Collaborator"), color: cleanColor(message.color), selectedIds: message.selectedIds };
+    case "emoji_reaction":
+      if (typeof message.emoji !== "string" || message.emoji.length < 1 || message.emoji.length > 16) return null;
+      return {
+        ...common,
+        id: cleanText(message.id, 64, `reaction-${Date.now()}`),
+        emoji: cleanText(message.emoji, 16),
+        userName: cleanText(message.userName, 60, "Collaborator"),
+        color: cleanColor(message.color),
+        timestamp: isFiniteNumber(message.timestamp, 0, Number.MAX_SAFE_INTEGER) ? message.timestamp : Date.now(),
+      };
     case "drawing_stream":
       if (!pointsValid(message.points) || !isFiniteNumber(message.width, 0.1, 200)) return null;
       return { ...common, points: message.points, color: cleanColor(message.color), width: message.width, isHighlighter: message.isHighlighter === true };

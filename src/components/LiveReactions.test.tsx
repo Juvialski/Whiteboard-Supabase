@@ -1,4 +1,4 @@
-﻿import React from 'react';
+import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import LiveReactions from './LiveReactions';
@@ -41,5 +41,10 @@ describe('LiveReactions', () => {
 
     expect(screen.getByText('🚀')).toBeTruthy();
     expect(screen.getByText('Alice')).toBeTruthy();
+  });
+
+  it('supports custom className on the launcher container', () => {
+    const { container } = render(<LiveReactions onSendReaction={vi.fn()} className="custom-launcher-class" />);
+    expect(container.querySelector('.custom-launcher-class')).toBeTruthy();
   });
 });

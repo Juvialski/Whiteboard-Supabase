@@ -229,7 +229,7 @@ export default function PdfPageNavigation({
 
       {/* Thumbnail Drawer Sidebar */}
       {isDrawerOpen && (
-        <div className="fixed top-16 left-4 bottom-20 w-80 bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-2xl rounded-3xl z-30 flex flex-col overflow-hidden animate-in fade-in slide-in-from-left duration-200">
+        <div className="fixed top-14 sm:top-16 left-2 sm:left-4 bottom-24 sm:bottom-20 w-80 max-w-[calc(100vw-1rem)] bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-2xl rounded-3xl z-30 flex flex-col overflow-hidden animate-in fade-in slide-in-from-left duration-200">
           <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50/80">
             <div className="flex items-center space-x-2">
               <Layers className="w-4 h-4 text-indigo-600" />
@@ -376,7 +376,7 @@ export default function PdfPageNavigation({
       )}
 
       {/* Floating Bottom Navigation Bar */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-xl rounded-2xl px-3 py-1.5 flex items-center space-x-2 text-slate-700">
+      <div className="fixed bottom-18 md:bottom-6 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur-xl border border-slate-200/90 shadow-xl rounded-2xl px-2.5 sm:px-3 py-1.5 flex items-center space-x-1.5 sm:space-x-2 text-slate-700 max-w-[96vw] overflow-x-auto scrollbar-none">
         {/* Toggle Page Drawer */}
         <button
           onClick={() => setIsDrawerOpen(!isDrawerOpen)}

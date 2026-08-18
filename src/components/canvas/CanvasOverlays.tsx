@@ -9,9 +9,9 @@ interface ReadOnlyAlertBannerProps {
 export const ReadOnlyAlertBanner: React.FC<ReadOnlyAlertBannerProps> = ({ show }) => {
   if (!show) return null;
   return (
-    <div className="fixed top-18 left-1/2 -translate-x-1/2 bg-amber-500 text-white font-bold text-xs px-5 py-3 rounded-full shadow-2xl z-50 flex items-center space-x-2 border border-amber-400 animate-bounce">
-      <Lock className="w-3.5 h-3.5 text-white" />
-      <span>
+    <div className="fixed top-18 left-1/2 -translate-x-1/2 bg-amber-500 text-white font-bold text-xs px-4 sm:px-5 py-2.5 sm:py-3 rounded-full shadow-2xl z-50 flex items-center space-x-2 border border-amber-400 animate-bounce max-w-[92vw] text-center">
+      <Lock className="w-3.5 h-3.5 text-white shrink-0" />
+      <span className="truncate sm:whitespace-normal">
         View-Only Mode: The teacher has locked writing access on this board.
       </span>
     </div>
@@ -34,7 +34,7 @@ export const SyncNotificationToast: React.FC<SyncNotificationToastProps> = ({
   if (!notification.visible) return null;
   return (
     <div
-      className={`fixed bottom-6 right-6 px-4 py-3 rounded-xl shadow-2xl z-50 flex items-center space-x-2.5 border transition-all duration-300 ${
+      className={`fixed bottom-18 sm:bottom-6 right-3 sm:right-6 px-4 py-3 rounded-xl shadow-2xl z-50 flex items-center space-x-2.5 border transition-all duration-300 max-w-[calc(100vw-1.5rem)] ${
         notification.type === "success"
           ? "bg-emerald-600 text-white border-emerald-500"
           : notification.type === "error"
@@ -48,12 +48,12 @@ export const SyncNotificationToast: React.FC<SyncNotificationToastProps> = ({
       {notification.type === "error" && <WifiOff className="w-4 h-4 text-white shrink-0" />}
       {notification.type === "warning" && <WifiOff className="w-4 h-4 text-white shrink-0" />}
       {notification.type === "info" && <Wifi className="w-4 h-4 text-white shrink-0 animate-pulse" />}
-      <span className="text-xs font-semibold tracking-wide">
+      <span className="text-xs font-semibold tracking-wide truncate sm:whitespace-normal">
         {notification.message}
       </span>
       <button
         onClick={onDismiss}
-        className="text-white hover:text-white/80 p-0.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer"
+        className="text-white hover:text-white/80 p-0.5 rounded-full hover:bg-white/10 transition-colors cursor-pointer shrink-0"
       >
         <X className="w-3.5 h-3.5" />
       </button>
@@ -74,7 +74,7 @@ export const FollowIndicatorBanner: React.FC<FollowIndicatorBannerProps> = ({
 }) => {
   if (!followedUserId) return null;
   return (
-    <div className="fixed top-18 left-1/2 -translate-x-1/2 z-40 bg-slate-900/90 backdrop-blur-md text-white font-bold text-xs px-4 py-2.5 rounded-2xl shadow-xl border border-slate-700/80 flex items-center space-x-3 animate-fade-in">
+    <div className="fixed top-18 left-1/2 -translate-x-1/2 z-40 bg-slate-900/90 backdrop-blur-md text-white font-bold text-xs px-4 py-2.5 rounded-2xl shadow-xl border border-slate-700/80 flex items-center space-x-3 animate-fade-in max-w-[94vw]">
       <div className="flex items-center space-x-2">
         <span className="relative flex h-2.5 w-2.5">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
