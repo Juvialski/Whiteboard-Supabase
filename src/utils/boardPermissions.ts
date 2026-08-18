@@ -30,13 +30,13 @@ export function getBoardPermissions(
   if (effectivePermission) {
     const canRead = ['viewer', 'editor', 'owner', 'admin'].includes(effectivePermission);
     const canWrite = boardData?.effectiveCanWrite === true || boardData?.effective_can_write === true;
-    const canManage = boardData?.effectiveCanManage === true || boardData?.effective_can_manage === true;
+    const canManage = boardData?.effectiveCanManage === true || boardData?.effective_can_manage === true || ['owner', 'admin'].includes(effectivePermission);
     return {
       canRead,
       canWrite,
       canManage,
       canDelete: canManage,
-      isOwner: effectivePermission === 'owner',
+      isOwner: ['owner', 'admin'].includes(effectivePermission),
       isAdmin: effectivePermission === 'admin',
     };
   }
@@ -47,7 +47,7 @@ export function getBoardPermissions(
 
   // Deny while the secure board manifest is unresolved. This prevents guests
   // from making edits that look successful locally but are rejected by Supabase.
-  if (!boardData || !authUser || !authUser.uid) {
+  if (!boardData || !authUser || (!authUser.uid && !(authUser as any).id)) {
     return {
       canRead: false,
       canWrite: false,
@@ -59,8 +59,8 @@ export function getBoardPermissions(
   }
 
   const isAdmin = !!authUser.admin;
-  const uid = authUser.uid;
-  const ownerUid = boardData?.ownerUid || '';
+  const uid = authUser.uid || (authUser as any).id || '';
+  const ownerUid = boardData?.ownerUid || boardData?.owner_uid || '';
   const isOwner = Boolean(ownerUid && ownerUid === uid);
 
   if (isAdmin || isOwner) {
@@ -69,7 +69,7 @@ export function getBoardPermissions(
       canWrite: true,
       canManage: true,
       canDelete: true,
-      isOwner,
+      isOwner: true,
       isAdmin,
     };
   }

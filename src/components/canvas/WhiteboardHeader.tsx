@@ -173,8 +173,10 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
     : Object.values(socketCollaboratorsRef.current)
   ).filter((collab: any) => collab.id !== currentUser.id);
 
+  const isOwnerOrManager = Boolean(isOwner || canManage);
+
   const togglePresenterMode = () => {
-    if (!isOwner) return;
+    if (!isOwnerOrManager) return;
     const nextState = !isPresenterMode;
     setIsPresenterMode(nextState);
     if (nextState) {
@@ -550,12 +552,16 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           )}
         </div>
 
-        {/* Important active states stay visible without occupying full text buttons. */}
-        {isPresenterMode && isOwner && (
+        {/* Presenter Mode button for board owner / manager */}
+        {isOwnerOrManager && (
           <button
             onClick={togglePresenterMode}
-            className="hidden sm:flex min-w-[36px] min-h-[36px] p-2 rounded-xl items-center justify-center bg-purple-600 border border-purple-700 text-white shadow-sm ring-2 ring-purple-400/40"
-            title="Stop Presenter Mode"
+            className={`hidden sm:flex min-w-[36px] min-h-[36px] p-2 rounded-xl items-center justify-center border transition-colors ${
+              isPresenterMode
+                ? "bg-purple-600 border-purple-700 text-white shadow-sm ring-2 ring-purple-400/40"
+                : "bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100"
+            }`}
+            title={isPresenterMode ? "Stop Presenter Mode" : "Start Presenter Mode (Lock & stream to student screens)"}
           >
             <Video className="w-4 h-4" />
           </button>
@@ -616,7 +622,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
             <div className="absolute right-0 top-11 w-[235px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-5rem)] overflow-y-auto bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2 z-50 animate-fade-in">
               <div className="px-2 py-1.5 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Board controls</div>
 
-              {isOwner && (
+              {isOwnerOrManager && (
                 <button
                   onClick={() => {
                     togglePresenterMode();

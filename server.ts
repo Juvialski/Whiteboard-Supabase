@@ -503,7 +503,7 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
   const allowed = context.canWrite ? WRITER_EVENTS : VIEWER_EVENTS;
   if (!allowed.has(type)) return null;
   if ((type === "board_settings_changed" || type === "member_permission_changed") && !context.canManage) return null;
-  if ((type === "request_follow" || type === "stop_follow") && context.permission !== "owner") return null;
+  if ((type === "request_follow" || type === "stop_follow") && !context.canManage && context.permission !== "owner" && context.permission !== "admin") return null;
   const common = { type, boardId: context.boardId, userId: context.userId, lastActive: Date.now() };
 
   switch (type) {

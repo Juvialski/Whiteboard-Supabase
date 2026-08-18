@@ -1212,12 +1212,19 @@ export default function WhiteboardCanvas({
     ? currentUser?.id
       ? { uid: currentUser.id, admin: adminClaim }
       : null
-    : auth.currentUser
-      ? { uid: auth.currentUser.uid, admin: adminClaim }
+    : (auth.currentUser?.uid || currentUser?.id)
+      ? { uid: auth.currentUser?.uid || currentUser.id, admin: adminClaim }
       : null;
 
   const permissions = getBoardPermissions(boardData, activeAuthUser);
-  const isOwner = isSandboxEnvironment() || permissions.isOwner || (Boolean(boardData?.ownerUid) && boardData.ownerUid === currentUser.id);
+  const isOwner = isSandboxEnvironment() ||
+    permissions.isOwner ||
+    permissions.isAdmin ||
+    permissions.canManage ||
+    (Boolean(boardData?.ownerUid) && (boardData?.ownerUid === currentUser?.id || boardData?.ownerUid === auth.currentUser?.uid)) ||
+    (Boolean((boardData as any)?.owner_uid) && ((boardData as any)?.owner_uid === currentUser?.id || (boardData as any)?.owner_uid === auth.currentUser?.uid)) ||
+    (Boolean(boardData?.createdBy) && (boardData?.createdBy === currentUser?.id || boardData?.createdBy === currentUser?.name || boardData?.createdBy === currentUser?.email)) ||
+    (Boolean((boardData as any)?.created_by) && ((boardData as any)?.created_by === currentUser?.id || (boardData as any)?.created_by === currentUser?.name || (boardData as any)?.created_by === currentUser?.email));
   const isPresenterLocked = !isOwner && Boolean(presenterTeacherId);
   const isPresenterLockedRef = useRef(isPresenterLocked);
   isPresenterLockedRef.current = isPresenterLocked;
@@ -1226,7 +1233,7 @@ export default function WhiteboardCanvas({
   const alertTimeoutRef = useRef<any>(null);
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
   const canWrite = isSandboxEnvironment() || (permissions.canWrite && !isPresenterLocked);
-  const canManage = isSandboxEnvironment() || permissions.canManage;
+  const canManage = isSandboxEnvironment() || permissions.canManage || isOwner;
   const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
   const isTeacher = canManage;
   canManageRef.current = canManage;
