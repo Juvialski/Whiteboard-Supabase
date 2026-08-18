@@ -18,6 +18,7 @@ import {
   subscribeBoardSocketMessages,
   subscribeBoardSocketStatus,
 } from './boardSocketService';
+import { hydrateBoardAssetMetadata } from './storageService';
 
 export type BoardLoadState = 'idle' | 'loading-manifest' | 'loading-shards' | 'ready' | 'error';
 
@@ -651,6 +652,8 @@ async function fetchBoardAndAllShards(control: BoardControl): Promise<void> {
   const payload = statePayload as any;
   boardRow = payload?.board;
   shardRows = Array.isArray(payload?.shards) ? payload.shards : [];
+  const assetRows = Array.isArray(payload?.assets) ? payload.assets : [];
+  hydrateBoardAssetMetadata(control.boardId, assetRows);
 
   if (!boardRow) throw new Error('Board not found or access denied.');
 

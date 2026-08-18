@@ -1,6 +1,13 @@
-import { auth, supabase } from '../supabase';
+import {
+  del as idbDel,
+  get as idbGet,
+  keys as idbKeys,
+  set as idbSet,
+} from 'idb-keyval';
+import { activeSupabaseUrl, auth, supabase } from '../supabase';
 import { isSandboxEnvironment } from '../utils/sandboxGuard';
 import { trackOperation } from '../utils/databaseInstrumentation';
+import { deriveBoardRecoveryProjectScope } from '../utils/boardRecoveryCache';
 
 export interface BoardAssetDoc {
   assetId: string;
@@ -59,10 +66,24 @@ interface InFlightAssetEntry {
   promise: Promise<BoardAssetDoc | null>;
 }
 
+interface PersistedAssetEntry {
+  version: 1;
+  projectScope: string;
+  userScope: string;
+  boardId: string;
+  assetId: string;
+  contentHash: string;
+  document: BoardAssetDoc;
+  savedAt: number;
+}
+
 const BUCKET = 'board-assets';
 const KEY_SEPARATOR = '\u001f';
+const IDB_ASSET_PREFIX = 'wb_asset_v1_';
+const MAX_PERSISTED_ASSET_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const assetCacheMap = new Map<string, CachedAssetEntry>();
 const hashToAssetIdMap = new Map<string, string>();
+const assetMetadataMap = new Map<string, any>();
 const inFlightAssetRequests = new Map<string, InFlightAssetEntry>();
 let totalAssetCacheBytes = 0;
 let assetCacheEpoch = 0;
@@ -85,6 +106,10 @@ const ALLOWED_ASSET_MIME_TYPES = new Set([
   'audio/webm',
 ]);
 
+function currentProjectScope(): string {
+  return deriveBoardRecoveryProjectScope(activeSupabaseUrl || 'unconfigured');
+}
+
 function currentAssetUserScope(): string {
   return encodeURIComponent(auth.currentUser?.uid || 'no-auth-user');
 }
@@ -95,6 +120,14 @@ function cacheKeyFor(boardId: string, assetId: string, userScope = currentAssetU
 
 function hashCacheKey(boardId: string, contentHash: string, userScope = currentAssetUserScope()): string {
   return [userScope, boardId, contentHash].join(KEY_SEPARATOR);
+}
+
+function metadataKeyFor(boardId: string, assetId: string): string {
+  return `${boardId}${KEY_SEPARATOR}${assetId}`;
+}
+
+function makeIdbAssetKey(project: string, user: string, boardId: string, assetId: string, contentHash: string): string {
+  return `${IDB_ASSET_PREFIX}${project}_${user}_${encodeURIComponent(boardId)}_${encodeURIComponent(assetId)}_${encodeURIComponent(contentHash)}`;
 }
 
 function boardEpoch(boardId: string): number {
@@ -158,6 +191,115 @@ function getCachedAsset(boardId: string, assetId: string): BoardAssetDoc | null 
 function removeAssetFromAllCaches(boardId: string, assetId: string): void {
   for (const [key, entry] of Array.from(assetCacheMap.entries())) {
     if (entry.boardId === boardId && entry.assetId === assetId) removeCacheEntry(key);
+  }
+}
+
+async function loadAssetFromIdb(
+  boardId: string,
+  assetId: string,
+  contentHash: string
+): Promise<BoardAssetDoc | null> {
+  if (typeof indexedDB === 'undefined' || isSandboxEnvironment()) return null;
+  const project = currentProjectScope();
+  const user = currentAssetUserScope();
+
+  try {
+    const key = makeIdbAssetKey(project, user, boardId, assetId, contentHash);
+    const entry = await idbGet<PersistedAssetEntry>(key);
+    if (!entry || entry.version !== 1 || !entry.document?.data) return null;
+    if (
+      entry.projectScope !== project ||
+      entry.userScope !== user ||
+      entry.boardId !== boardId ||
+      entry.assetId !== assetId ||
+      entry.contentHash !== contentHash
+    ) {
+      await idbDel(key).catch(() => undefined);
+      return null;
+    }
+    if (!Number.isFinite(entry.savedAt) || Date.now() - entry.savedAt > MAX_PERSISTED_ASSET_AGE_MS) {
+      await idbDel(key).catch(() => undefined);
+      return null;
+    }
+    return entry.document;
+  } catch (error) {
+    console.warn('Unable to read asset from IndexedDB cache:', error);
+  }
+  return null;
+}
+
+async function saveAssetToIdb(boardId: string, document: BoardAssetDoc): Promise<void> {
+  if (typeof indexedDB === 'undefined' || isSandboxEnvironment()) return;
+  const project = currentProjectScope();
+  const user = currentAssetUserScope();
+  const key = makeIdbAssetKey(project, user, boardId, document.assetId, document.contentHash);
+
+  const entry: PersistedAssetEntry = {
+    version: 1,
+    projectScope: project,
+    userScope: user,
+    boardId,
+    assetId: document.assetId,
+    contentHash: document.contentHash,
+    document,
+    savedAt: Date.now(),
+  };
+
+  try {
+    await idbSet(key, entry);
+  } catch (error) {
+    console.warn('Unable to persist asset to IndexedDB (quota or storage error):', error);
+  }
+}
+
+async function removeAssetFromIdb(boardId: string, assetId: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  const project = currentProjectScope();
+  const user = currentAssetUserScope();
+  const prefix = `${IDB_ASSET_PREFIX}${project}_${user}_${encodeURIComponent(boardId)}_${encodeURIComponent(assetId)}_`;
+
+  try {
+    const allKeys = await idbKeys();
+    for (const key of allKeys) {
+      if (typeof key === 'string' && key.startsWith(prefix)) {
+        await idbDel(key).catch(() => undefined);
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to delete asset from IndexedDB:', error);
+  }
+}
+
+async function clearIdbAssetCache(boardId?: string): Promise<void> {
+  if (typeof indexedDB === 'undefined') return;
+  const project = currentProjectScope();
+  const user = currentAssetUserScope();
+  const prefix = boardId
+    ? `${IDB_ASSET_PREFIX}${project}_${user}_${encodeURIComponent(boardId)}_`
+    : `${IDB_ASSET_PREFIX}`;
+
+  try {
+    const allKeys = await idbKeys();
+    for (const key of allKeys) {
+      if (typeof key === 'string' && key.startsWith(prefix)) {
+        await idbDel(key).catch(() => undefined);
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to clear IndexedDB asset cache:', error);
+  }
+}
+
+/** Hydrate batch metadata received from get_board_state RPC upfront. */
+export function hydrateBoardAssetMetadata(boardId: string, metadataRows: any[]): void {
+  if (!Array.isArray(metadataRows) || !boardId) return;
+  for (const row of metadataRows) {
+    if (row && typeof row === 'object' && row.asset_id) {
+      assetMetadataMap.set(metadataKeyFor(boardId, row.asset_id), row);
+      if (row.content_hash) {
+        hashToAssetIdMap.set(hashCacheKey(boardId, row.content_hash), row.asset_id);
+      }
+    }
   }
 }
 
@@ -420,9 +562,12 @@ export async function saveBoardAsset(
     created_by: createdBy || null,
   };
 
+  assetMetadataMap.set(metadataKeyFor(boardId, assetId), metadataRow);
+
   if (isSandboxEnvironment()) {
-    cacheDataUrlAsset(boardId, metadataRow, finalData, blob.size);
+    const doc = cacheDataUrlAsset(boardId, metadataRow, finalData, blob.size);
     hashToAssetIdMap.set(hashKey, assetId);
+    void saveAssetToIdb(boardId, doc);
     return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   }
 
@@ -448,7 +593,9 @@ export async function saveBoardAsset(
       if (existingError) throw existingError;
       if (existing) {
         hashToAssetIdMap.set(hashKey, existing.asset_id);
-        cacheDataUrlAsset(boardId, existing, finalData, blob.size);
+        assetMetadataMap.set(metadataKeyFor(boardId, existing.asset_id), existing);
+        const doc = cacheDataUrlAsset(boardId, existing, finalData, blob.size);
+        void saveAssetToIdb(boardId, doc);
         trackOperation('read', 'supabase-asset-dedup-hit', 1);
         return {
           assetId: existing.asset_id,
@@ -475,7 +622,9 @@ export async function saveBoardAsset(
           await supabase.storage.from(BUCKET).remove([objectPath]).catch(() => undefined);
         }
         hashToAssetIdMap.set(hashKey, existing.asset_id);
-        cacheDataUrlAsset(boardId, existing, finalData, blob.size);
+        assetMetadataMap.set(metadataKeyFor(boardId, existing.asset_id), existing);
+        const doc = cacheDataUrlAsset(boardId, existing, finalData, blob.size);
+        void saveAssetToIdb(boardId, doc);
         return {
           assetId: existing.asset_id,
           mimeType: existing.mime_type,
@@ -490,12 +639,15 @@ export async function saveBoardAsset(
 
     trackOperation('write', 'supabase-storage-upload', 1);
     trackOperation('write', 'supabase-asset-metadata', 1);
-    cacheDataUrlAsset(boardId, metadataRow, finalData, blob.size);
+    const doc = cacheDataUrlAsset(boardId, metadataRow, finalData, blob.size);
     hashToAssetIdMap.set(hashKey, assetId);
+    void saveAssetToIdb(boardId, doc);
     return { assetId, mimeType: effectiveContentType, encodedByteSize: finalData.length };
   } catch (error) {
     removeAssetFromAllCaches(boardId, assetId);
     hashToAssetIdMap.delete(hashKey);
+    assetMetadataMap.delete(metadataKeyFor(boardId, assetId));
+    void removeAssetFromIdb(boardId, assetId);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to save asset: ${message}`);
   }
@@ -516,22 +668,69 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
   let request!: Promise<BoardAssetDoc | null>;
   request = (async () => {
     try {
-      const { data: metadata, error: metadataError } = await supabase
-        .from('board_assets')
-        .select('*')
-        .eq('board_id', boardId)
-        .eq('asset_id', assetId)
-        .maybeSingle();
-      if (metadataError) {
-        throw new AssetLoadError('metadata_query_failed', `Unable to read metadata for asset ${assetId}.`, metadataError);
+      const cachedMeta = assetMetadataMap.get(metadataKeyFor(boardId, assetId));
+      const knownHash = cachedMeta?.content_hash;
+
+      // 1. Check persistent IndexedDB cache before making network calls
+      const idbDoc = knownHash ? await loadAssetFromIdb(boardId, assetId, knownHash) : null;
+      if (idbDoc) {
+        if (
+          requestEpoch === assetCacheEpoch &&
+          requestBoardEpoch === boardEpoch(boardId) &&
+          requestUserScope === currentAssetUserScope()
+        ) {
+          cacheAsset(boardId, idbDoc, idbDoc.originalByteSize);
+          hashToAssetIdMap.set(hashCacheKey(boardId, idbDoc.contentHash), assetId);
+          trackOperation('read', 'indexeddb-asset-cache-hit', 1);
+          return idbDoc;
+        }
+        return null;
       }
-      if (!metadata) return null;
+
+      // 2. If metadata is not present from batch hydration, query database
+      let metadata = cachedMeta;
+      if (!metadata) {
+        const { data: fetchedMeta, error: metadataError } = await supabase
+          .from('board_assets')
+          .select('*')
+          .eq('board_id', boardId)
+          .eq('asset_id', assetId)
+          .maybeSingle();
+        if (metadataError) {
+          throw new AssetLoadError('metadata_query_failed', `Unable to read metadata for asset ${assetId}.`, metadataError);
+        }
+        if (!fetchedMeta) return null;
+        metadata = fetchedMeta;
+        assetMetadataMap.set(metadataKeyFor(boardId, assetId), metadata);
+        trackOperation('read', 'supabase-asset-metadata-read', 1);
+      }
 
       const mimeType = String(metadata.mime_type || '').toLowerCase().split(';')[0].trim();
       if (!metadata.object_path || !ALLOWED_ASSET_MIME_TYPES.has(mimeType)) {
         throw new AssetLoadError('invalid_metadata', `Asset ${assetId} has invalid Storage metadata.`);
       }
 
+      // Batch metadata is the authorization and content-version boundary for
+      // persistent cache reads. A non-hydrated caller queried metadata above,
+      // so both paths now use the same content hash before reading IndexedDB.
+      if (!knownHash && metadata.content_hash) {
+        const metadataIdbDoc = await loadAssetFromIdb(boardId, assetId, metadata.content_hash);
+        if (metadataIdbDoc) {
+          if (
+            requestEpoch === assetCacheEpoch &&
+            requestBoardEpoch === boardEpoch(boardId) &&
+            requestUserScope === currentAssetUserScope()
+          ) {
+            cacheAsset(boardId, metadataIdbDoc, metadataIdbDoc.originalByteSize);
+            hashToAssetIdMap.set(hashCacheKey(boardId, metadataIdbDoc.contentHash), assetId);
+            trackOperation('read', 'indexeddb-asset-cache-hit', 1);
+            return metadataIdbDoc;
+          }
+          return null;
+        }
+      }
+
+      // 3. Cache miss: download from Supabase Storage
       const { data: blob, error: downloadError } = await supabase.storage
         .from(BUCKET)
         .download(metadata.object_path);
@@ -567,8 +766,11 @@ export async function getBoardAsset(boardId: string, assetId: string): Promise<B
 
       const document = cacheDataUrlAsset(boardId, metadata, dataUrl, blob.size);
       hashToAssetIdMap.set(hashCacheKey(boardId, document.contentHash), assetId);
-      trackOperation('read', 'supabase-asset-metadata-read', 1);
       trackOperation('read', 'supabase-storage-download', 1);
+
+      // Persist to IndexedDB
+      void saveAssetToIdb(boardId, document);
+
       return document;
     } catch (error) {
       if (error instanceof AssetLoadError) throw error;
@@ -599,6 +801,8 @@ export async function deleteAssetFromStorage(
   const cached = getCachedAsset(boardId, assetId);
   if (cached?.contentHash) hashToAssetIdMap.delete(hashCacheKey(boardId, cached.contentHash));
   removeAssetFromAllCaches(boardId, assetId);
+  assetMetadataMap.delete(metadataKeyFor(boardId, assetId));
+  void removeAssetFromIdb(boardId, assetId);
 
   const { data: metadata, error: metadataError } = await supabase
     .from('board_assets')
@@ -645,7 +849,9 @@ export function clearAssetCache(boardId?: string): void {
     assetCacheMap.clear();
     totalAssetCacheBytes = 0;
     hashToAssetIdMap.clear();
+    assetMetadataMap.clear();
     inFlightAssetRequests.clear();
+    void clearIdbAssetCache();
     return;
   }
 
@@ -657,9 +863,14 @@ export function clearAssetCache(boardId?: string): void {
     const [, keyBoardId] = key.split(KEY_SEPARATOR);
     if (keyBoardId === boardId) hashToAssetIdMap.delete(key);
   }
+  for (const key of Array.from(assetMetadataMap.keys())) {
+    const [keyBoardId] = key.split(KEY_SEPARATOR);
+    if (keyBoardId === boardId) assetMetadataMap.delete(key);
+  }
   for (const [key, entry] of Array.from(inFlightAssetRequests.entries())) {
     if (entry.boardId === boardId) inFlightAssetRequests.delete(key);
   }
+  void clearIdbAssetCache(boardId);
 }
 
 /** Exposed for diagnostics and regression tests. */

@@ -47,5 +47,8 @@ A temporary alert can still happen during a Render free-service restart, deploym
 - Added a WebSocket payload limit and rejected non-`/ws` upgrades.
 - Added graceful `SIGTERM` and `SIGINT` shutdown handling.
 - Added a production check that fails clearly when `dist/index.html` is missing.
+- Added batched asset metadata hydration and the persistent identity-scoped media cache.
 
-These changes do not modify Supabase tables, RLS policies, board persistence, storage, or the whiteboard interface.
+The application changes require the ordered
+`202608080001_free_tier_concurrency_optimizations.sql` migration on existing
+Supabase projects. Apply only that new migration; do not rerun the root schema.

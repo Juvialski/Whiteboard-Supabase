@@ -15,6 +15,7 @@ const expected = [
   '202608060002_fix_apply_board_mutations_jsonb_count.sql',
   '202608060003_fix_board_asset_upload.sql',
   '202608070001_add_individual_member_view_only.sql',
+  '202608080001_free_tier_concurrency_optimizations.sql',
 ];
 
 const failures = [];

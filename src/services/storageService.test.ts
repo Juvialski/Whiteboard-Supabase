@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   clearAssetCache,
   getAssetCacheStats,
+  getBoardAsset,
+  hydrateBoardAssetMetadata,
   MAX_ASSET_CACHE_BYTES,
   saveBoardAsset,
 } from './storageService';
@@ -43,5 +45,37 @@ describe('storageService safe data-url cache', () => {
     await expect(
       saveBoardAsset('board-cache', undefined, 'data:image/png;base64,SGVsbG8=', 'image/png', 'user-1'),
     ).rejects.toThrow(/do not match image\/png/i);
+  });
+
+  it('keeps batch-hydrated metadata compatible with the asset cache', async () => {
+    const metadataRows = [
+      {
+        board_id: 'board-batch',
+        asset_id: 'asset-batch-1',
+        mime_type: 'image/png',
+        object_path: 'boards/board-batch/asset-batch-1.png',
+        encoded_byte_size: 100,
+        content_hash: 'hash-batch-1',
+        created_at: 1234567,
+      },
+      {
+        board_id: 'board-batch',
+        asset_id: 'asset-batch-2',
+        mime_type: 'image/png',
+        object_path: 'boards/board-batch/asset-batch-2.png',
+        encoded_byte_size: 200,
+        content_hash: 'hash-batch-2',
+        created_at: 1234568,
+      },
+    ];
+
+    hydrateBoardAssetMetadata('board-batch', metadataRows);
+
+    // The test runs in local sandbox mode, so the saved document is resolved
+    // from the bounded in-memory cache without contacting Supabase.
+    const saved = await saveBoardAsset('board-batch', 'asset-batch-1', ONE_PIXEL_PNG, 'image/png', 'user-1');
+    expect(saved.assetId).toBe('asset-batch-1');
+    const cached = await getBoardAsset('board-batch', 'asset-batch-1');
+    expect(cached?.data).toBe(ONE_PIXEL_PNG);
   });
 });

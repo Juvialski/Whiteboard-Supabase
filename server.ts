@@ -5,6 +5,7 @@ import { constants as fsConstants } from "fs";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import http from "http";
+import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -31,10 +32,20 @@ const APP_ORIGINS = new Set(
     .filter(Boolean),
 );
 
+function parsePositiveInt(val: string | undefined, fallback: number, min = 1, max = 500): number {
+  const parsed = Number(val);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? Math.trunc(parsed) : fallback;
+}
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
 const rooms = new Map<string, Set<WebSocket>>();
-const connectionsByIp = new Map<string, number>();
+
+interface IpConnectionStats {
+  unauthenticated: number;
+  authenticated: number;
+}
+const ipConnectionStats = new Map<string, IpConnectionStats>();
 let isShuttingDown = false;
 
 const SHAPES = new Set([
@@ -51,9 +62,11 @@ const WRITER_EVENTS = new Set([
   "member_permission_changed",
 ]);
 const EPHEMERAL_EVENTS = new Set(["cursor", "laser_point", "drawing_stream", "element_focus", "emoji_reaction"]);
-const MAX_ROOM_CLIENTS = 20;
-const MAX_CONNECTIONS_PER_IP = 12;
-const MAX_USER_CONNECTIONS_PER_ROOM = 4;
+
+const MAX_ROOM_CLIENTS = parsePositiveInt(process.env.MAX_ROOM_CLIENTS, 40, 1, 200);
+const MAX_CONNECTIONS_PER_IP = parsePositiveInt(process.env.MAX_CONNECTIONS_PER_IP, 30, 1, 200);
+const MAX_PREAUTH_CONNECTIONS_PER_IP = parsePositiveInt(process.env.MAX_PREAUTH_CONNECTIONS_PER_IP, 10, 1, 50);
+const MAX_USER_CONNECTIONS_PER_ROOM = parsePositiveInt(process.env.MAX_USER_CONNECTIONS_PER_ROOM, 4, 1, 16);
 const BACKPRESSURE_LIMIT = 512 * 1024;
 
 type SocketPermission = "viewer" | "editor" | "owner" | "admin";
@@ -75,6 +88,77 @@ interface SocketContext {
   rateWindows: Map<string, { startedAt: number; count: number }>;
 }
 const socketContexts = new WeakMap<WebSocket, SocketContext>();
+
+interface CachedTokenUser {
+  user: any;
+  expiresAt: number;
+}
+const verifiedTokenCache = new Map<string, CachedTokenUser>();
+const authAttemptsByIp = new Map<string, { startedAt: number; count: number }>();
+
+interface CachedBoardManifest {
+  revision: number;
+  changedShardIds: string[];
+  deletedShardIds: string[];
+  totalElements: number;
+  updatedAt: number;
+  cachedAt: number;
+}
+const boardManifestCache = new Map<string, CachedBoardManifest>();
+
+function hashToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function parseJwtExp(token: string): number | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    if (typeof payload?.exp === "number" && Number.isFinite(payload.exp)) {
+      return payload.exp * 1000;
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+}
+
+function checkAuthRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const current = authAttemptsByIp.get(ip);
+  const entry = !current || now - current.startedAt >= 10_000 ? { startedAt: now, count: 0 } : current;
+  entry.count += 1;
+  authAttemptsByIp.set(ip, entry);
+  return entry.count <= 30;
+}
+
+async function verifyTokenCached(
+  verifier: any,
+  accessToken: string
+): Promise<{ user: any; error: any }> {
+  const tokenHash = hashToken(accessToken);
+  const now = Date.now();
+  const cached = verifiedTokenCache.get(tokenHash);
+  if (cached && cached.expiresAt > now) {
+    return { user: cached.user, error: null };
+  }
+
+  const { data: userData, error: userError } = await verifier.auth.getUser(accessToken);
+  if (userError || !userData?.user) {
+    verifiedTokenCache.delete(tokenHash);
+    return { user: null, error: userError };
+  }
+
+  const exp = parseJwtExp(accessToken);
+  const maxTtlMs = 60_000;
+  const expiresAt = exp ? Math.min(exp, now + maxTtlMs) : now + maxTtlMs;
+  if (expiresAt > now) {
+    verifiedTokenCache.set(tokenHash, { user: userData.user, expiresAt });
+  }
+
+  return { user: userData.user, error: null };
+}
 
 function safeErrorLabel(error: unknown): string {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -234,10 +318,6 @@ function remoteKeyForRequest(request: http.IncomingMessage): string {
   const forwardedParts = typeof raw === 'string'
     ? raw.split(',').map((value) => value.trim()).filter(Boolean)
     : [];
-  // Render is the one trusted proxy in front of this process. When a client
-  // supplies an existing X-Forwarded-For value, trusted proxies append the
-  // address they observed. The right-most value is therefore the only safe
-  // forwarded candidate; trusting the first lets clients evade IP limits.
   return forwardedParts[forwardedParts.length - 1] || request.socket.remoteAddress || 'unknown';
 }
 
@@ -252,8 +332,6 @@ function releaseSocket(ws: WebSocket): void {
     if (clients?.size === 0) {
       rooms.delete(boardId);
     } else if (context.userId && clients) {
-      // A user may have two tabs open. Announce departure only after their last
-      // socket leaves this room so collaborator chips do not flicker.
       const userStillPresent = Array.from(clients).some(
         (client) => socketContexts.get(client)?.userId === context.userId,
       );
@@ -269,9 +347,18 @@ function releaseSocket(ws: WebSocket): void {
       }
     }
   }
-  const remaining = Math.max(0, (connectionsByIp.get(context.remoteKey) || 1) - 1);
-  if (remaining === 0) connectionsByIp.delete(context.remoteKey);
-  else connectionsByIp.set(context.remoteKey, remaining);
+
+  const stats = ipConnectionStats.get(context.remoteKey);
+  if (stats) {
+    if (context.authenticated) {
+      stats.authenticated = Math.max(0, stats.authenticated - 1);
+    } else {
+      stats.unauthenticated = Math.max(0, stats.unauthenticated - 1);
+    }
+    if (stats.unauthenticated === 0 && stats.authenticated === 0) {
+      ipConnectionStats.delete(context.remoteKey);
+    }
+  }
 }
 
 function closePolicy(ws: WebSocket, reason: string): void {
@@ -309,9 +396,6 @@ function relayElementDataValid(value: unknown, elementId: string, isMerge: boole
   const data = value as Record<string, unknown>;
   const allowedTypes = new Set(["sticky", "shape", "text", "drawing", "image", "connector", "audio", "stamp", "math", "table"]);
 
-  // Working collaboration builds allowed compact merge patches. Requiring every
-  // realtime edit to contain a complete element silently dropped text/style
-  // updates and made collaborators wait for the next database checkpoint.
   if (data.id !== undefined && data.id !== elementId) return false;
   if (!isMerge) {
     if (typeof data.type !== "string" || !allowedTypes.has(data.type)) return false;
@@ -487,6 +571,11 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
     closePolicy(ws, "Authentication required");
     return;
   }
+  if (!checkAuthRateLimit(context.remoteKey)) {
+    closePolicy(ws, "Auth rate limit exceeded");
+    return;
+  }
+
   context.authenticating = true;
   if (!SUPABASE_URL || !SUPABASE_KEY) {
     ws.send(JSON.stringify({ type: "auth_error", error: "Realtime server is not configured." }));
@@ -495,8 +584,8 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
   }
 
   const verifier = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
-  const { data: userData, error: userError } = await verifier.auth.getUser(message.accessToken);
-  if (userError || !userData.user) {
+  const { user, error: userError } = await verifyTokenCached(verifier, message.accessToken);
+  if (userError || !user) {
     ws.send(JSON.stringify({ type: "auth_error", error: "Session verification failed." }));
     closePolicy(ws, "Authentication failed");
     return;
@@ -522,14 +611,22 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
     closePolicy(ws, "Board room is full");
     return;
   }
-  const sameUserConnections = Array.from(clients).filter((client) => socketContexts.get(client)?.userId === userData.user.id).length;
+  const sameUserConnections = Array.from(clients).filter((client) => socketContexts.get(client)?.userId === user.id).length;
   if (sameUserConnections >= MAX_USER_CONNECTIONS_PER_ROOM) {
     closePolicy(ws, "Too many sessions for this board");
     return;
   }
+
+  // Update IP connection stats from unauthenticated to authenticated
+  const stats = ipConnectionStats.get(context.remoteKey);
+  if (stats) {
+    stats.unauthenticated = Math.max(0, stats.unauthenticated - 1);
+    stats.authenticated += 1;
+  }
+
   context.authenticating = false;
   context.authenticated = true;
-  context.userId = userData.user.id;
+  context.userId = user.id;
   context.boardId = message.boardId;
   context.permission = permission;
   context.canWrite = canWrite;
@@ -543,13 +640,10 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
   rooms.set(message.boardId, clients);
   ws.send(JSON.stringify({ type: "authenticated", boardId: message.boardId, permission, canWrite, canManage }));
 
-  // Ask existing browsers to announce their current cursor/profile state. This
-  // lets a newly joined collaborator populate the people list immediately
-  // without a database-backed presence read or waiting for mouse movement.
   const probe = JSON.stringify({
     type: "collaborator_probe",
     boardId: message.boardId,
-    userId: userData.user.id,
+    userId: user.id,
   });
   for (const client of existingClients) {
     if (client.readyState === WebSocket.OPEN) client.send(probe);
@@ -587,6 +681,51 @@ async function loadAuthoritativeManifest(
     totalElements: Math.max(0, Number(data.total_elements || 0)),
     updatedAt: Math.max(0, Number(data.updated_at || Date.now())),
   };
+}
+
+async function getOrVerifyManifest(
+  ws: WebSocket,
+  context: SocketContext,
+  requestedRevision: number
+): Promise<Record<string, unknown> | null> {
+  const boardId = context.boardId;
+  if (!boardId) return null;
+
+  const now = Date.now();
+  const cached = boardManifestCache.get(boardId);
+
+  // A cached manifest is authoritative only for the exact revision that was
+  // previously read from the database. Never promote client-reported shard
+  // metadata for a new revision: an authenticated client could otherwise send
+  // a forged sequential revision and make peers hydrate the wrong shards.
+  if (
+    cached &&
+    cached.revision === requestedRevision &&
+    now - cached.cachedAt < 5 * 60_000
+  ) {
+    return {
+      revision: cached.revision,
+      changedShardIds: cached.changedShardIds,
+      deletedShardIds: cached.deletedShardIds,
+      totalElements: cached.totalElements,
+      updatedAt: cached.updatedAt,
+    };
+  }
+
+  // New revisions, gaps, restarts, and stale entries must be verified against
+  // the authoritative board row.
+  const authoritative = await loadAuthoritativeManifest(ws, context, requestedRevision);
+  if (authoritative) {
+    boardManifestCache.set(boardId, {
+      revision: Number(authoritative.revision),
+      changedShardIds: authoritative.changedShardIds as string[],
+      deletedShardIds: authoritative.deletedShardIds as string[],
+      totalElements: Number(authoritative.totalElements),
+      updatedAt: Number(authoritative.updatedAt),
+      cachedAt: now,
+    });
+  }
+  return authoritative;
 }
 
 async function refreshSocketAuthorization(ws: WebSocket, context: SocketContext, maxAgeMs: number): Promise<boolean> {
@@ -642,19 +781,21 @@ function configureWebSockets(): void {
 
   wss.on("connection", (ws: WebSocket, request: http.IncomingMessage) => {
     const remoteKey = remoteKeyForRequest(request);
-    const connectionCount = connectionsByIp.get(remoteKey) || 0;
+    const stats = ipConnectionStats.get(remoteKey) || { unauthenticated: 0, authenticated: 0 };
     const context: SocketContext = {
       authenticated: false, authenticating: false, userId: null, boardId: null, permission: null, canWrite: false, canManage: false,
       accessToken: null, lastAuthorizationCheck: 0, authorizationRefresh: null, remoteKey, released: false,
       isAlive: true, authTimer: null, rateWindows: new Map(),
     };
     socketContexts.set(ws, context);
-    if (connectionCount >= MAX_CONNECTIONS_PER_IP) {
+
+    if (stats.unauthenticated >= MAX_PREAUTH_CONNECTIONS_PER_IP || (stats.unauthenticated + stats.authenticated) >= MAX_CONNECTIONS_PER_IP) {
       context.released = true;
       closePolicy(ws, "Too many connections");
       return;
     }
-    connectionsByIp.set(remoteKey, connectionCount + 1);
+    stats.unauthenticated += 1;
+    ipConnectionStats.set(remoteKey, stats);
     context.authTimer = setTimeout(() => closePolicy(ws, "Authentication timeout"), 5_000);
 
     ws.on("pong", () => { context.isAlive = true; });
@@ -666,16 +807,12 @@ function configureWebSockets(): void {
           const message = JSON.parse(text);
           if (!context.authenticated) return await authenticateSocket(ws, message, context);
           const messageType = cleanText(message?.type, 40);
-          // Keep revocation reasonably fresh without turning drawing traffic into
-          // a database read every few seconds on the Supabase Free plan. Manifest
-          // announcements receive a tighter check and are then verified against
-          // the authoritative board row below.
           const authorizationMaxAge = messageType === 'board_manifest_changed' ? 30_000 : 60_000;
           if (!(await refreshSocketAuthorization(ws, context, authorizationMaxAge))) return;
           let payload = sanitizeRelayMessage(message, context);
           if (!payload) return;
           if (payload.type === "board_manifest_changed") {
-            const authoritative = await loadAuthoritativeManifest(ws, context, Number(payload.revision));
+            const authoritative = await getOrVerifyManifest(ws, context, Number(payload.revision));
             if (!authoritative) return;
             payload = { ...payload, ...authoritative };
           }
@@ -687,9 +824,6 @@ function configureWebSockets(): void {
           if (!clients) return;
 
           if (payload.type === "board_settings_changed") {
-            // The manager has already committed the setting through patch_board.
-            // Refresh every peer immediately so a newly locked editor cannot keep
-            // sending writes for the normal authorization-cache window.
             await Promise.all(Array.from(clients).map(async (client) => {
               if (client === ws || client.readyState !== WebSocket.OPEN) return;
               const peerContext = socketContexts.get(client);
@@ -704,9 +838,6 @@ function configureWebSockets(): void {
           }
 
           if (payload.type === "member_permission_changed") {
-            // The manager has already committed the membership role through the
-            // security-definer RPC. Refresh only that user's live sockets so the
-            // write gate changes immediately without adding recurring DB reads.
             const targetUserId = String(payload.targetUserId || "");
             await Promise.all(Array.from(clients).map(async (client) => {
               if (client === ws || client.readyState !== WebSocket.OPEN) return;
@@ -738,6 +869,17 @@ function configureWebSockets(): void {
   });
 
   const heartbeat = setInterval(() => {
+    const now = Date.now();
+    for (const [hash, entry] of verifiedTokenCache) {
+      if (now >= entry.expiresAt) verifiedTokenCache.delete(hash);
+    }
+    for (const [ip, entry] of authAttemptsByIp) {
+      if (now - entry.startedAt >= 20_000) authAttemptsByIp.delete(ip);
+    }
+    for (const [boardId, manifest] of boardManifestCache) {
+      if (now - manifest.cachedAt >= 5 * 60_000) boardManifestCache.delete(boardId);
+    }
+
     for (const client of wss.clients) {
       const context = socketContexts.get(client);
       if (!context) continue;

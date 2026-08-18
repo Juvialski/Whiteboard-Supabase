@@ -9,7 +9,9 @@ the dashboard, and stale page responses are ignored.
 ## Initial board load and offline edits
 
 The client first resolves authenticated board access, then loads one
-`get_board_state(board_id)` RPC containing the board manifest and existing shards.
+`get_board_state(board_id)` RPC containing the board manifest, existing shards,
+and asset metadata. Media bytes are still fetched from private Storage only when
+needed.
 Unsynced mutations are stored under project/user/board IndexedDB keys. Their
 restoration completes before cloud hydration is considered ready, preventing a
 slow IndexedDB read from losing local work or briefly exposing another account's
@@ -51,8 +53,10 @@ authentication; ephemeral events are dropped under disconnection or backpressure
 
 Images, signatures, audio, and PDF pages are uploaded to private Supabase Storage.
 Rows contain asset IDs and metadata rather than Base64 media. Downloads use
-self-contained data URLs in a 64 MB bounded LRU cache with identity-scoped eviction
-and in-flight request deduplication.
+self-contained data URLs in a 64 MB bounded LRU cache with project/user/board/asset
+identity scoping, a 30-day persistent IndexedDB cache, and in-flight request
+deduplication. Persistent hits require the current asset content hash from
+authorized board metadata.
 
 ## Graphs and exports
 

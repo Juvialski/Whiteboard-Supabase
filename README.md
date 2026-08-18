@@ -13,7 +13,8 @@ Supabase Free project and one Render Free web service.
 - Private Storage for images, signatures, audio, and PDF pages
 - One WebSocket per board/browser for cursors, live strokes, previews, and manifests
 - Project/user/board-scoped IndexedDB queues for unsynced edits
-- Bounded data-URL media cache; cloud boards are not duplicated into localStorage
+- Project/user/board/asset-scoped persistent media cache with batched asset metadata
+- Cloud boards are not duplicated into localStorage
 - Lightweight keyset-paginated dashboard queries
 
 ## Start a new project
@@ -60,5 +61,6 @@ Only put the Supabase **publishable/anon key** in
 `VITE_SUPABASE_PUBLISHABLE_KEY`. Never expose a service-role or secret key in the
 browser or Render frontend environment.
 
-For the already-upgraded production project, this follow-up source package needs
-no additional SQL. Use `FINAL_DEPLOYMENT_CHECKLIST.md` after deployment.
+For the already-upgraded production project, apply the new migration
+`supabase/migrations/202608080001_free_tier_concurrency_optimizations.sql` once,
+then use `FINAL_DEPLOYMENT_CHECKLIST.md` for the application rollout.

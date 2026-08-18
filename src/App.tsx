@@ -198,8 +198,8 @@ export default function App() {
   }, []);
 
   // Read the global app status only when a real Supabase session exists.
-  // Postgres Changes provides immediate updates when Realtime is enabled for
-  // the table; a low-frequency poll is retained as a reliable free-tier fallback.
+  // A low-frequency poll and window focus listener provide reliable status
+  // updates on the free tier without consuming Supabase Realtime connections.
   useEffect(() => {
     if (isSandboxEnvironment() || !authInitialized || !authUserId) {
       setAppEnabled(true);
@@ -223,14 +223,6 @@ export default function App() {
     };
 
     void loadSetting();
-    const channel = supabase
-      .channel(`app-settings-${authUserId}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'admin_settings', filter: 'id=eq.global' },
-        () => void loadSetting()
-      )
-      .subscribe();
     const poll = window.setInterval(() => void loadSetting(), 60_000);
     const handleFocus = () => void loadSetting();
     window.addEventListener('focus', handleFocus);
@@ -239,7 +231,6 @@ export default function App() {
       active = false;
       window.clearInterval(poll);
       window.removeEventListener('focus', handleFocus);
-      void supabase.removeChannel(channel);
     };
   }, [authInitialized, authUserId]);
 
@@ -306,7 +297,7 @@ export default function App() {
       if (document.visibilityState === 'visible' && navigator.onLine) {
         void updatePresence(true, true);
       }
-    }, 90_000);
+    }, 300_000);
     const handleVisibility = () => {
       void updatePresence(document.visibilityState === 'visible', true);
     };

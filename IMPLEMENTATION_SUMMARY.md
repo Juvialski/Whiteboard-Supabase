@@ -15,7 +15,7 @@ browser, persistent Render disks, or paid infrastructure.
 7. Large reconnect/paste/import queues use resumable 400-item/approximately-6-MB RPC batches.
 8. One authenticated WebSocket per browser/board with immutable identity and permission refresh.
 9. Anonymous students can redeem valid links but cannot create boards or share links; Turnstile is optional.
-10. Private Storage has MIME/signature checks, 20 MB files, bounded board usage, and a 64 MB bounded data-URL LRU cache.
+10. Private Storage has MIME/signature checks, 20 MB files, bounded board usage, a 64 MB bounded data-URL LRU cache, and an identity-scoped persistent asset cache.
 11. Dashboard queries are lightweight and keyset-paginated; high-frequency collaboration avoids Postgres.
 12. A safe graph parser replaces runtime JavaScript evaluation and supports graph exports.
 13. PNG/SVG/PDF exports cover persisted media and all noninteractive board element types.
@@ -24,9 +24,10 @@ browser, persistent Render disks, or paid infrastructure.
 
 ## Existing production project
 
-The production Supabase project has already received the security and follow-up SQL
-fixes from the preceding rollout. **This source-code follow-up does not require
-another SQL Editor action.** Deploy the application files and run the regression
+The production Supabase project must first receive the new
+`202608080001_free_tier_concurrency_optimizations.sql` migration after the
+preceding migrations have been confirmed. Apply only that migration, not the
+generated root schema. Then deploy the application files and run the regression
 checklist in `FINAL_DEPLOYMENT_CHECKLIST.md`.
 
 ## New Supabase project

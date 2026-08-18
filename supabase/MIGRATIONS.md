@@ -6,7 +6,9 @@ this folder are the database source of truth and must be applied in filename ord
 ## Existing production project
 
 Do not rerun migrations that already succeeded. Apply only genuinely new migration
-files. The current source-code quality follow-up adds no production SQL action.
+files. The current concurrency follow-up adds
+`202608080001_free_tier_concurrency_optimizations.sql`; apply it once after the
+existing `202608070001_add_individual_member_view_only.sql` migration.
 The application intentionally fails with a clear error when a required secure RPC
 is missing; it never falls back to direct unrestricted table access.
 
