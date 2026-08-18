@@ -478,6 +478,10 @@ export default function WhiteboardCanvas({
   const [followedUserId, setFollowedUserId] = useState<string | null>(null);
   const followedUserIdRef = useRef<string | null>(null);
   followedUserIdRef.current = followedUserId;
+  const [presenterTeacherId, setPresenterTeacherId] = useState<string | null>(null);
+  const [presenterTeacherName, setPresenterTeacherName] = useState<string | null>(null);
+  const presenterTeacherIdRef = useRef<string | null>(null);
+  presenterTeacherIdRef.current = presenterTeacherId;
   const [isShortcutsOpen, setIsShortcutsOpen] = useState(false);
   const [isClearModalOpen, setIsClearModalOpen] = useState(false);
   const [containerDimensions, setContainerDimensions] = useState({
@@ -573,7 +577,12 @@ export default function WhiteboardCanvas({
 
         if (msg.type === "collaborator_left") {
           if (typeof msg.userId !== "string") return;
-          if (followedUserIdRef.current === msg.userId) {
+          if (presenterTeacherIdRef.current === msg.userId) {
+            setPresenterTeacherId(null);
+            setPresenterTeacherName(null);
+            setFollowedUserId(null);
+            showSyncToast("The presenter left the board. Screen unlocked.", "info");
+          } else if (followedUserIdRef.current === msg.userId) {
             setFollowedUserId(null);
             showSyncToast("The collaborator you were following left the board.", "info");
           }
@@ -611,7 +620,7 @@ export default function WhiteboardCanvas({
           };
           if (isNew) setActiveCollaboratorIds(Object.keys(socketCollaboratorsRef.current));
 
-          // When following another user: follow ONLY their screen / viewport (panX, panY, zoom, view center), NOT their mouse cursor movement
+          // When following another user / presenter: follow ONLY their screen / viewport (panX, panY, zoom, view center), NOT their mouse cursor movement
           if (followedUserIdRef.current === msg.userId) {
             const targetZoom = msg.zoom !== undefined ? msg.zoom : zoomRef.current;
             const containerW = containerDimensions.width || window.innerWidth;
@@ -630,15 +639,32 @@ export default function WhiteboardCanvas({
             }
           }
         } else if (msg.type === "request_follow") {
-          if (!canManageRef.current && msg.teacherId) {
+          if (msg.teacherId && msg.teacherId !== currentUser.id) {
+            setPresenterTeacherId(msg.teacherId);
+            setPresenterTeacherName(msg.teacherName || "Presenter");
             setFollowedUserId(msg.teacherId);
-            showSyncToast(`${msg.teacherName || "Teacher"} is sharing view! Following screen...`, "info");
+            setSelectedId(null);
+            setSelectedIds([]);
+            setActiveTool("select");
+            showSyncToast(`${msg.teacherName || "Presenter"} started Presenter Mode. Screen is locked to read-only.`, "info");
+            if (msg.viewCenterX !== undefined && msg.viewCenterY !== undefined) {
+              const targetZoom = msg.zoom !== undefined ? msg.zoom : zoomRef.current;
+              const containerW = containerDimensions.width || window.innerWidth;
+              const containerH = containerDimensions.height || window.innerHeight;
+              setPanX(containerW / 2 - msg.viewCenterX * targetZoom);
+              setPanY(containerH / 2 - msg.viewCenterY * targetZoom);
+              if (msg.zoom !== undefined) setZoom(msg.zoom);
+            } else if (msg.panX !== undefined && msg.panY !== undefined) {
+              setPanX(msg.panX);
+              setPanY(msg.panY);
+              if (msg.zoom !== undefined) setZoom(msg.zoom);
+            }
           }
         } else if (msg.type === "stop_follow") {
-          if (!canManageRef.current) {
-            setFollowedUserId(null);
-            showSyncToast("The presenter has stopped sharing their view.", "info");
-          }
+          setPresenterTeacherId(null);
+          setPresenterTeacherName(null);
+          setFollowedUserId(null);
+          showSyncToast("The presenter has stopped sharing their view. Screen unlocked.", "info");
         } else if (msg.type === "drawing_stream") {
           remoteDrawingStreamsRef.current[msg.userId] = {
             points: msg.points,
@@ -830,6 +856,7 @@ export default function WhiteboardCanvas({
 
   const handleSetFollowedUser = React.useCallback(
     (targetId: string | null) => {
+      if (isPresenterLockedRef.current) return;
       setFollowedUserId((prev) => {
         const nextId = prev === targetId ? null : targetId;
         followedUserIdRef.current = nextId;
@@ -1190,11 +1217,15 @@ export default function WhiteboardCanvas({
       : null;
 
   const permissions = getBoardPermissions(boardData, activeAuthUser);
+  const isOwner = isSandboxEnvironment() || permissions.isOwner || (Boolean(boardData?.ownerUid) && boardData.ownerUid === currentUser.id);
+  const isPresenterLocked = !isOwner && Boolean(presenterTeacherId);
+  const isPresenterLockedRef = useRef(isPresenterLocked);
+  isPresenterLockedRef.current = isPresenterLocked;
 
   const [showReadOnlyAlert, setShowReadOnlyAlert] = useState(false);
   const alertTimeoutRef = useRef<any>(null);
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
-  const canWrite = isSandboxEnvironment() || permissions.canWrite;
+  const canWrite = isSandboxEnvironment() || (permissions.canWrite && !isPresenterLocked);
   const canManage = isSandboxEnvironment() || permissions.canManage;
   const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
   const isTeacher = canManage;
@@ -1263,10 +1294,10 @@ export default function WhiteboardCanvas({
   }, [boardId, boardMembers, canManage, showSyncToast, studentsCanWrite]);
 
   useEffect(() => {
-    if (!canManage && isPresenterMode) {
+    if (!isOwner && isPresenterMode) {
       setIsPresenterMode(false);
     }
-  }, [canManage, isPresenterMode]);
+  }, [isOwner, isPresenterMode]);
 
   const isPdfBoard = boardName.startsWith("PDF: ") || pdfPages.length > 0;
   const [isAppendingPdf, setIsAppendingPdf] = useState(false);
@@ -1546,9 +1577,9 @@ export default function WhiteboardCanvas({
     if (!container) return;
 
     const handleNativeWheel = (e: WheelEvent) => {
-      // Zooming and navigation are safe for viewers. Write permission must only
-      // gate board mutations, never movement around a read-only canvas.
+      // Zooming and navigation are safe for viewers, but completely locked during Presenter Mode.
       e.preventDefault();
+      if (isPresenterLockedRef.current) return;
       
       const rect = container.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -1633,6 +1664,10 @@ export default function WhiteboardCanvas({
     };
 
     const handleNativeTouchStart = (e: TouchEvent) => {
+      if (isPresenterLockedRef.current) {
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
       // Two-finger navigation is available in both edit and view-only modes.
       if (e.touches.length === 2) {
         // Pinch-to-zoom multi-touch trigger
@@ -1658,6 +1693,10 @@ export default function WhiteboardCanvas({
     };
 
     const handleNativeTouchMove = (e: TouchEvent) => {
+      if (isPresenterLockedRef.current) {
+        if (e.cancelable) e.preventDefault();
+        return;
+      }
       // 1. Two-finger pinch-to-zoom (including view-only boards)
       if (e.touches.length === 2 && touchStartData.dist > 0) {
         e.preventDefault();
@@ -2315,6 +2354,8 @@ export default function WhiteboardCanvas({
       name: currentUser.name,
       color: currentUser.color,
       role: currentUser.role,
+      x: lastSyncedCursorPos.current.x || 0,
+      y: lastSyncedCursorPos.current.y || 0,
       panX,
       panY,
       zoom,
@@ -2525,7 +2566,12 @@ export default function WhiteboardCanvas({
     // Only primary clicks trigger actions
     if (e.button !== 0) return;
 
-    if (followedUserId) {
+    if (isPresenterLocked) {
+      triggerReadOnlyAlert();
+      return;
+    }
+
+    if (followedUserId && !isPresenterLocked) {
       setFollowedUserId(null);
     }
 
@@ -3607,7 +3653,9 @@ export default function WhiteboardCanvas({
       }
 
       if (e.key === "Escape") {
-        setFollowedUserId(null);
+        if (!isPresenterLockedRef.current) {
+          setFollowedUserId(null);
+        }
         setSelectedId(null);
         setSelectedIds([]);
         setIsShortcutsOpen(false);
@@ -4009,6 +4057,7 @@ export default function WhiteboardCanvas({
 
   // Zoom handlers
   const handleZoomIn = () => {
+    if (isPresenterLocked) return;
     const container = containerRef.current;
     const currentZoom = zoomRef.current;
     const nextZoom = Math.min(3, currentZoom + 0.15);
@@ -4034,6 +4083,7 @@ export default function WhiteboardCanvas({
   };
 
   const handleZoomOut = () => {
+    if (isPresenterLocked) return;
     const container = containerRef.current;
     const currentZoom = zoomRef.current;
     const nextZoom = Math.max(0.15, currentZoom - 0.15);
@@ -4059,6 +4109,7 @@ export default function WhiteboardCanvas({
   };
 
   const handleZoomReset = () => {
+    if (isPresenterLocked) return;
     const container = containerRef.current;
     const currentZoom = zoomRef.current;
     const nextZoom = 1;
@@ -4181,6 +4232,8 @@ export default function WhiteboardCanvas({
         setIsPresenterMode={setIsPresenterMode}
         wsRef={wsRef}
         canManage={canManage}
+        isOwner={isOwner}
+        isPresenterLocked={isPresenterLocked}
         studentsCanWrite={displayedStudentsCanWrite}
         handleToggleStudentsCanWrite={handleToggleStudentsCanWrite}
         boardMembers={boardMembers}
@@ -4244,6 +4297,10 @@ export default function WhiteboardCanvas({
           <Toolbar
             activeTool={activeTool}
             onChangeTool={(tool) => {
+              if (isPresenterLocked) {
+                triggerReadOnlyAlert();
+                return;
+              }
               if (!canWrite && tool !== "select" && tool !== "pan") {
                 triggerReadOnlyAlert();
                 return;
@@ -4632,7 +4689,10 @@ export default function WhiteboardCanvas({
 
 
       {/* Read-Only Mode Floating Notice Banner */}
-      <ReadOnlyAlertBanner show={showReadOnlyAlert} />
+      <ReadOnlyAlertBanner
+        show={showReadOnlyAlert}
+        message={isPresenterLocked ? "Presenter Mode: The presenter is currently sharing their view. Screen is locked to read-only." : undefined}
+      />
 
       {/* Offline Sync Floating Toast Notice */}
       <SyncNotificationToast
@@ -4645,6 +4705,8 @@ export default function WhiteboardCanvas({
         followedUserId={followedUserId}
         collaborators={socketCollaboratorsRef.current}
         onStopFollow={() => setFollowedUserId(null)}
+        isPresenterLocked={isPresenterLocked}
+        presenterName={presenterTeacherName}
       />
 
       {/* Bottom Right Overlay Controls (Minimap & Live Reactions) */}
@@ -4660,6 +4722,7 @@ export default function WhiteboardCanvas({
                 containerWidth={containerDimensions.width}
                 containerHeight={containerDimensions.height}
                 onPanTo={(newPanX, newPanY) => {
+                  if (isPresenterLocked) return;
                   setPanX(newPanX);
                   setPanY(newPanY);
                 }}

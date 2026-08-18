@@ -55,6 +55,8 @@ interface WhiteboardHeaderProps {
   setIsPresenterMode: (val: boolean) => void;
   wsRef: React.MutableRefObject<BoardSocketHandle | null>;
   canManage?: boolean;
+  isOwner?: boolean;
+  isPresenterLocked?: boolean;
   studentsCanWrite: boolean;
   handleToggleStudentsCanWrite: () => void;
   boardMembers?: BoardMember[];
@@ -108,6 +110,8 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   setIsPresenterMode,
   wsRef,
   canManage = false,
+  isOwner = false,
+  isPresenterLocked = false,
   studentsCanWrite,
   handleToggleStudentsCanWrite,
   boardMembers = [],
@@ -170,6 +174,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   ).filter((collab: any) => collab.id !== currentUser.id);
 
   const togglePresenterMode = () => {
+    if (!isOwner) return;
     const nextState = !isPresenterMode;
     setIsPresenterMode(nextState);
     if (nextState) {
@@ -179,12 +184,12 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
           teacherName: currentUser.name,
         }));
       }
-      showSyncToast("Started Presenter Mode! Team will follow your screen.", "success");
+      showSyncToast("Started Presenter Mode! Team will follow your screen in read-only mode.", "success");
     } else {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "stop_follow" }));
       }
-      showSyncToast("Exited Presenter Mode.", "info");
+      showSyncToast("Exited Presenter Mode. Team screens unlocked.", "info");
     }
   };
 
@@ -517,18 +522,25 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
                       <button
                         key={collab.id}
                         onClick={() => {
+                          if (isPresenterLocked) return;
                           setFollowedUserId(isFollowed ? null : collab.id);
                           setIsPeopleMenuOpen(false);
                         }}
+                        disabled={isPresenterLocked}
                         className={`w-full px-2 py-2 rounded-xl flex items-center gap-2 text-left border transition-colors ${
                           isFollowed
                             ? "bg-blue-50 border-blue-200 text-blue-700"
-                            : "border-transparent hover:bg-slate-50 text-slate-700"
+                            : isPresenterLocked
+                              ? "opacity-50 cursor-not-allowed border-transparent text-slate-400"
+                              : "border-transparent hover:bg-slate-50 text-slate-700"
                         }`}
+                        title={isPresenterLocked ? "Presenter Mode is active" : (isFollowed ? "Click to unfollow" : `Follow ${collab.name}`)}
                       >
                         <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: collab.color }} />
                         <span className="min-w-0 flex-1 truncate text-xs font-semibold">{collab.name}</span>
-                        <span className="text-[9px] font-bold text-slate-400">{isFollowed ? "Following" : "Follow"}</span>
+                        <span className="text-[9px] font-bold text-slate-400">
+                          {isPresenterLocked ? "Locked" : (isFollowed ? "Following" : "Follow")}
+                        </span>
                       </button>
                     );
                   })}
@@ -539,7 +551,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
         </div>
 
         {/* Important active states stay visible without occupying full text buttons. */}
-        {isPresenterMode && canManage && (
+        {isPresenterMode && isOwner && (
           <button
             onClick={togglePresenterMode}
             className="hidden sm:flex min-w-[36px] min-h-[36px] p-2 rounded-xl items-center justify-center bg-purple-600 border border-purple-700 text-white shadow-sm ring-2 ring-purple-400/40"
@@ -604,7 +616,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
             <div className="absolute right-0 top-11 w-[235px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-5rem)] overflow-y-auto bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200 shadow-2xl p-2 z-50 animate-fade-in">
               <div className="px-2 py-1.5 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Board controls</div>
 
-              {canManage && (
+              {isOwner && (
                 <button
                   onClick={() => {
                     togglePresenterMode();

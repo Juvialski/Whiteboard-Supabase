@@ -40,6 +40,7 @@ function parsePositiveInt(val: string | undefined, fallback: number, min = 1, ma
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024, perMessageDeflate: false });
 const rooms = new Map<string, Set<WebSocket>>();
+const activePresenters = new Map<string, { userId: string; name: string }>();
 
 interface IpConnectionStats {
   unauthenticated: number;
@@ -329,8 +330,30 @@ function releaseSocket(ws: WebSocket): void {
   if (boardId) {
     const clients = rooms.get(boardId);
     clients?.delete(ws);
+
+    const presenter = activePresenters.get(boardId);
+    if (presenter && presenter.userId === context.userId) {
+      const userStillPresent = Array.from(clients || []).some(
+        (client) => socketContexts.get(client)?.userId === context.userId,
+      );
+      if (!userStillPresent) {
+        activePresenters.delete(boardId);
+        if (clients && clients.size > 0) {
+          const stopPayload = JSON.stringify({
+            type: "stop_follow",
+            boardId,
+            teacherId: context.userId,
+          });
+          for (const client of clients) {
+            if (client.readyState === WebSocket.OPEN) client.send(stopPayload);
+          }
+        }
+      }
+    }
+
     if (clients?.size === 0) {
       rooms.delete(boardId);
+      activePresenters.delete(boardId);
     } else if (context.userId && clients) {
       const userStillPresent = Array.from(clients).some(
         (client) => socketContexts.get(client)?.userId === context.userId,
@@ -479,13 +502,33 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
 
   const allowed = context.canWrite ? WRITER_EVENTS : VIEWER_EVENTS;
   if (!allowed.has(type)) return null;
-  if ((type === "request_follow" || type === "stop_follow" || type === "board_settings_changed" || type === "member_permission_changed") && !context.canManage) return null;
+  if ((type === "board_settings_changed" || type === "member_permission_changed") && !context.canManage) return null;
+  if ((type === "request_follow" || type === "stop_follow") && context.permission !== "owner") return null;
   const common = { type, boardId: context.boardId, userId: context.userId, lastActive: Date.now() };
 
   switch (type) {
-    case "cursor":
-      if (!isFiniteNumber(message.x) || !isFiniteNumber(message.y)) return null;
-      return { ...common, x: message.x, y: message.y, panX: isFiniteNumber(message.panX) ? message.panX : 0, panY: isFiniteNumber(message.panY) ? message.panY : 0, zoom: isFiniteNumber(message.zoom, 0.05, 20) ? message.zoom : 1, name: cleanText(message.name, 60, "Collaborator"), color: cleanColor(message.color), role: context.canManage ? "teacher" : "student" };
+    case "cursor": {
+      const x = isFiniteNumber(message.x) ? message.x : 0;
+      const y = isFiniteNumber(message.y) ? message.y : 0;
+      const panX = isFiniteNumber(message.panX) ? message.panX : 0;
+      const panY = isFiniteNumber(message.panY) ? message.panY : 0;
+      const zoom = isFiniteNumber(message.zoom, 0.05, 20) ? message.zoom : 1;
+      const viewCenterX = isFiniteNumber(message.viewCenterX) ? message.viewCenterX : undefined;
+      const viewCenterY = isFiniteNumber(message.viewCenterY) ? message.viewCenterY : undefined;
+      return {
+        ...common,
+        x,
+        y,
+        panX,
+        panY,
+        zoom,
+        viewCenterX,
+        viewCenterY,
+        name: cleanText(message.name, 60, "Collaborator"),
+        color: cleanColor(message.color),
+        role: context.permission === "owner" || context.canManage ? "teacher" : "student",
+      };
+    }
     case "laser_point":
       if (!isFiniteNumber(message.x) || !isFiniteNumber(message.y)) return null;
       return { ...common, x: message.x, y: message.y, timestamp: Date.now(), color: cleanColor(message.color) };
@@ -524,7 +567,16 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
       return { ...common, state, isOpen: message.isOpen === true };
     }
     case "request_follow":
-      return { ...common, teacherId: context.userId, teacherName: cleanText(message.teacherName, 60, "Teacher") };
+      return {
+        ...common,
+        teacherId: context.userId,
+        teacherName: cleanText(message.teacherName, 60, "Teacher"),
+        panX: isFiniteNumber(message.panX) ? message.panX : undefined,
+        panY: isFiniteNumber(message.panY) ? message.panY : undefined,
+        zoom: isFiniteNumber(message.zoom, 0.05, 20) ? message.zoom : undefined,
+        viewCenterX: isFiniteNumber(message.viewCenterX) ? message.viewCenterX : undefined,
+        viewCenterY: isFiniteNumber(message.viewCenterY) ? message.viewCenterY : undefined,
+      };
     case "stop_follow":
       return { ...common, teacherId: context.userId };
     case "board_settings_changed":
@@ -639,6 +691,16 @@ async function authenticateSocket(ws: WebSocket, message: any, context: SocketCo
   clients.add(ws);
   rooms.set(message.boardId, clients);
   ws.send(JSON.stringify({ type: "authenticated", boardId: message.boardId, permission, canWrite, canManage }));
+
+  const activePresenter = activePresenters.get(message.boardId);
+  if (activePresenter && activePresenter.userId !== user.id) {
+    ws.send(JSON.stringify({
+      type: "request_follow",
+      boardId: message.boardId,
+      teacherId: activePresenter.userId,
+      teacherName: activePresenter.name,
+    }));
+  }
 
   const probe = JSON.stringify({
     type: "collaborator_probe",
@@ -850,6 +912,15 @@ function configureWebSockets(): void {
                 closePolicy(client, "Authorization refresh failed");
               }
             }));
+          }
+
+          if (payload.type === "request_follow" && context.boardId) {
+            activePresenters.set(context.boardId, {
+              userId: context.userId!,
+              name: String(payload.teacherName || "Teacher"),
+            });
+          } else if (payload.type === "stop_follow" && context.boardId) {
+            activePresenters.delete(context.boardId);
           }
 
           const encoded = JSON.stringify(payload);

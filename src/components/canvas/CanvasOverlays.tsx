@@ -4,15 +4,16 @@ import { BoardElement, UserProfile } from "../../types";
 
 interface ReadOnlyAlertBannerProps {
   show: boolean;
+  message?: string;
 }
 
-export const ReadOnlyAlertBanner: React.FC<ReadOnlyAlertBannerProps> = ({ show }) => {
+export const ReadOnlyAlertBanner: React.FC<ReadOnlyAlertBannerProps> = ({ show, message }) => {
   if (!show) return null;
   return (
     <div className="fixed top-18 left-1/2 -translate-x-1/2 bg-amber-500 text-white font-bold text-xs px-4 sm:px-5 py-2.5 sm:py-3 rounded-full shadow-2xl z-50 flex items-center space-x-2 border border-amber-400 animate-bounce max-w-[92vw] text-center">
       <Lock className="w-3.5 h-3.5 text-white shrink-0" />
       <span className="truncate sm:whitespace-normal">
-        View-Only Mode: The teacher has locked writing access on this board.
+        {message || "View-Only Mode: The teacher has locked writing access on this board."}
       </span>
     </div>
   );
@@ -65,14 +66,43 @@ interface FollowIndicatorBannerProps {
   followedUserId: string | null;
   collaborators: Record<string, any>;
   onStopFollow: () => void;
+  isPresenterLocked?: boolean;
+  presenterName?: string | null;
 }
 
 export const FollowIndicatorBanner: React.FC<FollowIndicatorBannerProps> = ({
   followedUserId,
   collaborators,
   onStopFollow,
+  isPresenterLocked = false,
+  presenterName,
 }) => {
-  if (!followedUserId) return null;
+  if (!followedUserId && !isPresenterLocked) return null;
+
+  if (isPresenterLocked) {
+    const displayName = presenterName || (followedUserId ? collaborators[followedUserId]?.name : null) || "Board Owner";
+    return (
+      <div className="fixed top-18 left-1/2 -translate-x-1/2 z-40 bg-purple-950/95 backdrop-blur-md text-white font-bold text-xs px-4 py-2.5 rounded-2xl shadow-2xl border border-purple-500/60 flex items-center space-x-3 animate-fade-in max-w-[94vw] ring-2 ring-purple-500/30 select-none pointer-events-none">
+        <div className="flex items-center space-x-2.5">
+          <span className="relative flex h-2.5 w-2.5 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-purple-400"></span>
+          </span>
+          <span className="text-purple-100 flex items-center gap-1.5 flex-wrap">
+            <span className="font-bold text-purple-200">Presenter Mode Active:</span>
+            <span>Screen locked to</span>
+            <strong className="text-white font-extrabold underline decoration-purple-400 underline-offset-2">
+              {displayName}
+            </strong>
+          </span>
+          <span className="text-[10px] uppercase tracking-wider bg-purple-800/90 text-purple-200 px-2 py-0.5 rounded-md font-extrabold border border-purple-600/50 shadow-inner">
+            Read Only
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed top-18 left-1/2 -translate-x-1/2 z-40 bg-slate-900/90 backdrop-blur-md text-white font-bold text-xs px-4 py-2.5 rounded-2xl shadow-xl border border-slate-700/80 flex items-center space-x-3 animate-fade-in max-w-[94vw]">
       <div className="flex items-center space-x-2">
@@ -83,7 +113,7 @@ export const FollowIndicatorBanner: React.FC<FollowIndicatorBannerProps> = ({
         <span>
           Following{" "}
           <strong className="text-blue-400 font-extrabold">
-            {collaborators[followedUserId]?.name || "Collaborator"}
+            {collaborators[followedUserId!]?.name || "Collaborator"}
           </strong>
           's view
         </span>

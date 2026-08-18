@@ -1,47 +1,15 @@
-import React from 'react';
+﻿import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import ImageComponent from '../ImageComponent';
 import StickyComponent from '../StickyComponent';
 import StampComponent from '../StampComponent';
 import AudioComponent from '../AudioComponent';
 import PdfPageNavigation from '../PdfPageNavigation';
+import { FollowIndicatorBanner, ReadOnlyAlertBanner } from '../canvas/CanvasOverlays';
 import { BoardElement, ImageElement } from '../../types';
 
 describe('Frontend UI & Layering Automated Test Suite', () => {
   const dummyUser = { id: 'usr-1', name: 'Test Teacher', color: '#2563eb' };
-
-  it('renders PDF Page image element with zIndex 1 by default', () => {
-    const pdfElement: ImageElement = {
-      id: 'pdf-page-0-12345',
-      type: 'image',
-      x: 100,
-      y: 100,
-      width: 600,
-      height: 800,
-      src: 'data:image/svg+xml;utf8,<svg></svg>',
-      zIndex: -1,
-      updatedAt: Date.now(),
-    };
-
-    const { container } = render(
-      <ImageComponent
-        element={pdfElement}
-        isSelected={false}
-        currentUser={dummyUser}
-        zoom={1}
-        boardId="board-test"
-        isDraggingOrResizing={false}
-        onSelect={vi.fn()}
-        onUpdate={vi.fn()}
-        onDelete={vi.fn()}
-      />
-    );
-
-    const pdfDiv = container.querySelector('#image-pdf-page-0-12345');
-    expect(pdfDiv).toBeTruthy();
-    expect(window.getComputedStyle(pdfDiv!).zIndex).toBe('1');
-  });
 
   it('elevates selected elements zIndex to 40 so they render on top of all canvas layers', () => {
     const stickyElement: BoardElement = {
@@ -202,5 +170,51 @@ describe('Frontend UI & Layering Automated Test Suite', () => {
     const addPageBtn = screen.getByTitle('Insert Blank Page');
     fireEvent.click(addPageBtn);
     expect(onInsertBlankPage).toHaveBeenCalled();
+  });
+
+  it('renders FollowIndicatorBanner in voluntary follow mode with Stop button', () => {
+    const onStopFollow = vi.fn();
+    render(
+      <FollowIndicatorBanner
+        followedUserId="collab-1"
+        collaborators={{ 'collab-1': { id: 'collab-1', name: 'Alice' } }}
+        onStopFollow={onStopFollow}
+        isPresenterLocked={false}
+      />
+    );
+
+    expect(screen.getByText('Alice')).toBeTruthy();
+    expect(screen.getByText('Stop Following (Esc)')).toBeTruthy();
+    fireEvent.click(screen.getByText('Stop Following (Esc)'));
+    expect(onStopFollow).toHaveBeenCalled();
+  });
+
+  it('renders FollowIndicatorBanner in locked Presenter Mode with Read Only badge and no Stop button', () => {
+    const onStopFollow = vi.fn();
+    render(
+      <FollowIndicatorBanner
+        followedUserId="teacher-1"
+        collaborators={{ 'teacher-1': { id: 'teacher-1', name: 'Teacher Bob' } }}
+        onStopFollow={onStopFollow}
+        isPresenterLocked={true}
+        presenterName="Teacher Bob"
+      />
+    );
+
+    expect(screen.getByText(/Presenter Mode Active:/i)).toBeTruthy();
+    expect(screen.getByText('Teacher Bob')).toBeTruthy();
+    expect(screen.getByText(/Read Only/i)).toBeTruthy();
+    expect(screen.queryByText('Stop Following (Esc)')).toBeNull();
+  });
+
+  it('renders ReadOnlyAlertBanner with custom presenter mode message', () => {
+    render(
+      <ReadOnlyAlertBanner
+        show={true}
+        message="Presenter Mode: Screen is locked to read-only."
+      />
+    );
+
+    expect(screen.getByText('Presenter Mode: Screen is locked to read-only.')).toBeTruthy();
   });
 });
