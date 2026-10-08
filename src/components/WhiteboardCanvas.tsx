@@ -9,6 +9,7 @@ import {
   applyRemoteOperation,
   applyBoardMetadataPatchLocally,
   flushBoardCheckpoint,
+  getBoardSaveStatus,
   sanitizeElementForStorage,
   MAX_SINGLE_ELEMENT_BYTES,
 } from "../services/boardPersistence";
@@ -111,6 +112,7 @@ import {
 } from "lucide-react";
 import Markdown from "react-markdown";
 import WorkspaceTimer from "./WorkspaceTimer";
+import { useBoardTimer } from "../hooks/useBoardTimer";
 import { calculatePdfPageReflowPositions, exportPdfWithDrawings } from "../utils/pdf";
 import { exportBoardImage } from "../utils/boardExport";
 import { sampleRealtimeDrawingPoints } from "../utils/realtimeDrawing";
@@ -718,10 +720,6 @@ export default function WhiteboardCanvas({
               color: msg.color || "#ef4444",
             },
           ];
-        } else if (msg.type === "timer_sync") {
-          setSyncedTimerState(msg.state);
-          if (msg.isOpen !== undefined) setIsTimerOpen(msg.isOpen);
-          else if (msg.state && (msg.state.isRunning || msg.state.isOpen)) setIsTimerOpen(true);
         } else if (msg.type === "emoji_reaction") {
           if (msg.userId === currentUser.id) return;
           setIncomingReaction({
@@ -815,7 +813,7 @@ export default function WhiteboardCanvas({
   useEffect(() => {
     activeUsersCountRef.current = activeUsersCount;
   }, [activeUsersCount]);
-  const [syncStatus, setSyncStatus] = useState<'synced' | 'saving-cloud' | 'saved-local' | 'offline'>('synced');
+  const [syncStatus, setSyncStatus] = useState<'synced' | 'saving-cloud' | 'pending-local' | 'saved-local' | 'offline' | 'failed'>('synced');
   const hasUnsavedChanges = useRef<boolean>(false);
   const isMigratingRef = useRef<boolean>(false);
   const attemptedMigrationRef = useRef<Set<string>>(new Set());
@@ -839,13 +837,13 @@ export default function WhiteboardCanvas({
     const handleSyncStatus = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
         boardId?: string;
-        status?: 'synced' | 'saving-cloud' | 'saved-local' | 'offline';
+        status?: 'synced' | 'saving-cloud' | 'pending-local' | 'saved-local' | 'offline' | 'failed';
         message?: string;
       };
       if (detail?.boardId !== boardId || !detail.status) return;
       setSyncStatus(detail.status);
-      hasUnsavedChanges.current = detail.status === 'saved-local' || detail.status === 'offline';
-      if (detail.status === 'offline' && detail.message) {
+      hasUnsavedChanges.current = detail.status !== 'synced';
+      if ((detail.status === 'offline' || detail.status === 'failed') && detail.message) {
         showSyncToast(`Sync failed: ${detail.message}`, 'error', 10000);
       }
     };
@@ -945,8 +943,11 @@ export default function WhiteboardCanvas({
   }>({ w: 0, h: 0 });
 
   // Floating Workspace Timer & Presenter / Laser Pointer States
-  const [isTimerOpen, setIsTimerOpen] = useState(false);
-  const [syncedTimerState, setSyncedTimerState] = useState<any>(null);
+  const sharedTimer = useBoardTimer(boardId, currentUser.id);
+  const isTimerOpen = sharedTimer.state?.visible === true;
+  useEffect(() => {
+    if (sharedTimer.error) showSyncToast(sharedTimer.error, 'warning');
+  }, [sharedTimer.error, showSyncToast]);
   const [isPresenterMode, setIsPresenterMode] = useState(false);
   
   // High performance: Laser Pointer trails stored in Refs and drawn directly to a separate transparent canvas
@@ -1063,19 +1064,7 @@ export default function WhiteboardCanvas({
     }
   }, [panX, panY, zoom, pdfPages, containerDimensions, activePdfPageIndex]);
 
-  const handleTimerSync = React.useCallback((timerState: any) => {
-    setSyncedTimerState(timerState);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "timer_sync",
-          boardId,
-          state: timerState,
-          isOpen: isTimerOpen,
-        })
-      );
-    }
-  }, [boardId, isTimerOpen]);
+
 
   // Decay and Draw laser trails on Canvas
   const drawLaserTrails = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -1430,18 +1419,7 @@ export default function WhiteboardCanvas({
       triggerReadOnlyAlert();
       return;
     }
-    const nextOpen = !isTimerOpen;
-    setIsTimerOpen(nextOpen);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "timer_sync",
-          boardId,
-          state: syncedTimerState,
-          isOpen: nextOpen,
-        })
-      );
-    }
+    void sharedTimer.transition('visibility', isTimerOpen ? 0 : 1);
   };
 
   useEffect(() => {
@@ -1757,12 +1735,13 @@ export default function WhiteboardCanvas({
     setSyncStatus('saving-cloud');
     try {
       await flushBoardCheckpoint(boardId, 'manual-flush');
-      hasUnsavedChanges.current = false;
-      setSyncStatus('synced');
+      const status = getBoardSaveStatus(boardId);
+      hasUnsavedChanges.current = status !== 'synced';
+      setSyncStatus(status);
     } catch (err: any) {
       console.error("Flush pending changes to cloud failed:", err);
       hasUnsavedChanges.current = true;
-      setSyncStatus('offline');
+      setSyncStatus(getBoardSaveStatus(boardId) === 'failed' ? 'failed' : 'offline');
       showSyncToast("Sync failed: " + (err?.message || 'Error'), "error", 10000);
     }
   }, [boardId, showSyncToast]);
@@ -1857,7 +1836,7 @@ export default function WhiteboardCanvas({
       }));
     }
 
-    setSyncStatus('saved-local');
+    setSyncStatus('pending-local');
   }, [boardId, setElements, setSyncStatus, triggerReadOnlyAlert]);
 
   // Boards created before PDF deletion compacting can still contain a large
@@ -2265,8 +2244,8 @@ export default function WhiteboardCanvas({
 
     const handleOffline = () => {
       console.log("Device went offline.");
-      setSyncStatus('offline');
-      showSyncToast("You are offline. Progress is saved locally in buffer.", "warning");
+      setSyncStatus(getBoardSaveStatus(boardId) === 'failed' ? 'failed' : 'offline');
+      showSyncToast("You are offline. Check the save indicator before closing this tab.", "warning");
     };
 
     window.addEventListener("online", handleOnline);
@@ -2276,7 +2255,7 @@ export default function WhiteboardCanvas({
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, [flushPendingChanges, showSyncToast]);
+  }, [boardId, flushPendingChanges, showSyncToast]);
 
   // Clean selection when changing tools
   useEffect(() => {
@@ -3623,14 +3602,14 @@ export default function WhiteboardCanvas({
         setSyncStatus('saving-cloud');
         try {
           await flushBoardCheckpoint(boardId, 'paste-elements');
-          setSyncStatus('synced');
+          setSyncStatus(getBoardSaveStatus(boardId));
         } catch (err: any) {
           console.error("Error pasting elements:", err);
-          setSyncStatus('offline');
-          showSyncToast("Paste saved locally and will retry: " + (err?.message || 'Error'), "warning", 10000);
+          setSyncStatus(getBoardSaveStatus(boardId) === 'failed' ? 'failed' : 'offline');
+          showSyncToast("Paste sync could not be confirmed. Keep this tab open and check the save indicator: " + (err?.message || 'Error'), "warning", 10000);
         }
       } else {
-        setSyncStatus('saved-local');
+        setSyncStatus('pending-local');
       }
     } catch (err: any) {
       console.error("Unable to paste elements:", err);
@@ -3924,10 +3903,10 @@ export default function WhiteboardCanvas({
 
       setSyncStatus('saving-cloud');
       await flushBoardCheckpoint(boardId, 'clearBoard');
-      setSyncStatus('synced');
+      setSyncStatus(getBoardSaveStatus(boardId));
     } catch (err: any) {
       console.error("Error clearing whiteboard:", err);
-      setSyncStatus('offline');
+      setSyncStatus(getBoardSaveStatus(boardId) === 'failed' ? 'failed' : 'offline');
       showSyncToast("Clear failed: " + (err?.message || 'Error'), "error", 10000);
     }
   };
@@ -4673,17 +4652,24 @@ export default function WhiteboardCanvas({
             )}
           </svg>
 
-          {/* 3. Real-Time Collaborative Cursors Tracker Overlay */}
-          <LiveCursors
-            boardId={boardId}
-            currentUser={currentUser}
-            zoom={zoom}
-            socketCollaboratorsRef={wsConnected ? socketCollaboratorsRef : undefined}
-            followedUserId={followedUserId}
-            onFollowUser={handleSetFollowedUser}
-          />
-
         </div>
+        {/* Screen-space cursors avoid content and never intercept input; People owns Follow. */}
+        <LiveCursors
+          boardId={boardId}
+          currentUser={currentUser}
+          zoom={zoom}
+          panX={panX}
+          panY={panY}
+          viewportWidth={containerDimensions.width}
+          viewportHeight={containerDimensions.height}
+          elements={elements}
+          socketCollaboratorsRef={wsConnected ? socketCollaboratorsRef : undefined}
+          followedUserId={followedUserId}
+          remoteDrawingsRef={remoteDrawingStreamsRef}
+          localDrawingRef={drawingPointsRef}
+          localDrawingActiveRef={isDrawingRef}
+          localStrokeWidth={activeTool === 'highlighter' ? strokeWidth * 2.5 : strokeWidth}
+        />
 
         {/* New High Performance Laser Pointer Canvas Layer outside of transformed container */}
         <canvas
@@ -4753,23 +4739,14 @@ export default function WhiteboardCanvas({
 
       {/* Floating Workspace Sprint Timer & Stopwatch Widget */}
       <WorkspaceTimer
+        key={boardId + ':' + currentUser.id}
         isOpen={isTimerOpen}
-        onClose={() => {
-          if (!canWrite) return;
-          setIsTimerOpen(false);
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({
-                type: "timer_sync",
-                boardId,
-                state: syncedTimerState,
-                isOpen: false,
-              })
-            );
-          }
-        }}
-        onTimerSync={handleTimerSync}
-        syncedState={syncedTimerState}
+        onClose={() => { if (canWrite) void sharedTimer.transition('visibility', 0); }}
+        state={sharedTimer.state}
+        serverNow={sharedTimer.serverNow}
+        onAction={sharedTimer.transition}
+        error={sharedTimer.error}
+        busy={sharedTimer.busy}
         isReadOnly={!canWrite}
       />
 

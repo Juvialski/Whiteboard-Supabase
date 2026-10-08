@@ -180,10 +180,10 @@ export async function hasCurrentUserPendingMutationCaches(): Promise<boolean> {
     key.startsWith(PENDING_PREFIX_V2) &&
     key.slice(key.indexOf('_v2_') + 4).startsWith(suffixPrefix);
 
-  const keys = await idbKeys().catch(() => []);
+  const keys = await idbKeys();
   for (const key of keys) {
     if (typeof key !== 'string' || !belongsToCurrentUserPending(key)) continue;
-    const value = await idbGet<unknown>(key).catch(() => null);
+    const value = await idbGet<unknown>(key);
     if (Array.isArray(value) && value.length > 0) return true;
   }
   return false;
@@ -255,9 +255,10 @@ export async function migrateLegacyBoardCachesToIndexedDb(): Promise<void> {
       }
     } catch (error) {
       console.warn(`Unable to quarantine legacy board cache ${candidate.key}.`, error);
-    } finally {
-      localStorage.removeItem(candidate.key);
+      // Keep the only surviving copy when IndexedDB fails.
+      continue;
     }
+    localStorage.removeItem(candidate.key);
   }
 }
 

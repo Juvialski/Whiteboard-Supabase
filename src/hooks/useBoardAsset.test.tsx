@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getBoardAssetMock = vi.fn();
@@ -47,5 +47,32 @@ describe('useBoardAsset board context', () => {
     expect(getBoardAssetMock).toHaveBeenCalledWith('board-1', 'asset-1');
     expect(result.current.data).toBe('data:image/png;base64,AAAA');
     expect(result.current.error).toBeNull();
+  });
+  it('recovers a persisted PDF page image after a transient download failure', async () => {
+    getBoardAssetMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({
+      data: 'data:image/png;base64,PDFPAGE', mimeType: 'image/png',
+    });
+    const { result } = renderHook(() => useBoardAsset('pdf-board', 'page-image'));
+    await waitFor(() => expect(result.current.error?.message).toBe('offline'));
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.data).toBe('data:image/png;base64,PDFPAGE'));
+    expect(result.current.error).toBeNull();
+    expect(getBoardAssetMock).toHaveBeenLastCalledWith('pdf-board', 'page-image');
+  });
+  it('clears previous board media and ignores an old in-flight image response', async () => {
+    let oldResolve!: (asset: any) => void;
+    getBoardAssetMock.mockResolvedValueOnce({ data: 'old-image' })
+      .mockImplementationOnce(() => new Promise(resolve => { oldResolve = resolve; }))
+      .mockResolvedValueOnce({ data: 'new-image' });
+    const { result, rerender } = renderHook(({ board, asset }) => useBoardAsset(board, asset), {
+      initialProps: { board: 'old-board', asset: 'first' },
+    });
+    await waitFor(() => expect(result.current.data).toBe('old-image'));
+    rerender({ board: 'old-board', asset: 'second' });
+    expect(result.current.data).toBeNull();
+    rerender({ board: 'new-board', asset: 'new' });
+    await waitFor(() => expect(result.current.data).toBe('new-image'));
+    await act(async () => oldResolve({ data: 'stale-image' }));
+    expect(result.current.data).toBe('new-image');
   });
 });

@@ -120,6 +120,10 @@ interface PendingManifestRefresh {
 
 interface BoardControl {
   boardId: string;
+  pendingCacheKey: string | null;
+  locallyDurable: boolean;
+  recoveryPromise: Promise<void> | null;
+  recoveryUnsubscribe: (() => void) | null;
   subscribers: Set<(state: BoardState) => void>;
   shards: Map<string, Map<string, BoardElement>>;
   currentElements: Map<string, BoardElement>;
@@ -159,7 +163,7 @@ const SYNC_STATUS_EVENT = 'lucid_spark_sync_status';
 
 function emitSyncStatus(
   boardId: string,
-  status: 'synced' | 'saving-cloud' | 'saved-local' | 'offline',
+  status: 'synced' | 'saving-cloud' | 'pending-local' | 'saved-local' | 'offline' | 'failed',
   error?: unknown
 ): void {
   if (typeof window === 'undefined') return;
@@ -171,18 +175,18 @@ function emitSyncStatus(
 
 
 function safeIdbGet(key: string): Promise<any> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
-  return idbGet(key).catch(() => null);
+  if (typeof indexedDB === 'undefined') return Promise.reject(new Error('IndexedDB is unavailable.'));
+  return idbGet(key);
 }
 
 function safeIdbSet(key: string, value: any): Promise<void> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve();
-  return idbSet(key, value).catch(() => undefined);
+  if (typeof indexedDB === 'undefined') return Promise.reject(new Error('IndexedDB is unavailable.'));
+  return idbSet(key, value);
 }
 
 function safeIdbDel(key: string): Promise<void> {
-  if (typeof indexedDB === 'undefined') return Promise.resolve();
-  return idbDel(key).catch(() => undefined);
+  if (typeof indexedDB === 'undefined') return Promise.reject(new Error('IndexedDB is unavailable.'));
+  return idbDel(key);
 }
 
 function pendingKey(boardId: string): string | null {
@@ -277,8 +281,8 @@ function notify(control: BoardControl): void {
 }
 
 async function persistPending(control: BoardControl): Promise<void> {
-  const key = pendingKey(control.boardId);
-  if (!key) return;
+  const key = control.pendingCacheKey;
+  if (!key) throw new Error('Recovery identity is unavailable.');
 
   // Serialize writes to the same IndexedDB key. Rapid edits previously started
   // overlapping idbSet calls, allowing an older snapshot to finish last and
@@ -293,7 +297,12 @@ async function persistPending(control: BoardControl): Promise<void> {
       if (snapshot.length === 0) await safeIdbDel(key);
       else await safeIdbSet(key, snapshot);
     }
-  })().finally(() => {
+    control.locallyDurable = true;
+  })().catch((error) => {
+    control.locallyDurable = false;
+    emitSyncStatus(control.boardId, 'failed', 'Local recovery save failed. Keep this tab open and retry cloud sync.');
+    throw error;
+  }).finally(() => {
     control.pendingPersistPromise = null;
     // A mutation can arrive in the microtask between the final loop check and
     // this cleanup. Chain one more drain so callers awaiting the current write
@@ -370,7 +379,7 @@ async function restorePending(control: BoardControl, canWrite: boolean): Promise
   if (control.pendingRestorePromise) return control.pendingRestorePromise;
 
   control.pendingRestorePromise = (async () => {
-    const key = pendingKey(control.boardId);
+    const key = control.pendingCacheKey;
     if (canWrite && key) {
       mergePendingItems(control, await safeIdbGet(key));
       // Rewrite the queue after validation so corrupt legacy rows cannot poison
@@ -590,6 +599,10 @@ function createControl(boardId: string): BoardControl {
   });
   const control: BoardControl = {
     boardId,
+    pendingCacheKey: pendingKey(boardId),
+    locallyDurable: true,
+    recoveryPromise: null,
+    recoveryUnsubscribe: null,
     subscribers: new Set(),
     shards: new Map(),
     currentElements: new Map(),
@@ -656,10 +669,13 @@ async function fetchBoardAndAllShards(control: BoardControl): Promise<void> {
   hydrateBoardAssetMetadata(control.boardId, assetRows);
 
   if (!boardRow) throw new Error('Board not found or access denied.');
+  if (control.disposed || (control.hydrated && Number(boardRow.current_revision) < control.revision)) return;
 
-  control.boardData = mapBoardRow(boardRow);
-  control.revision = Number(control.boardData.currentRevision || 0);
-  await restorePending(control, control.boardData.effectiveCanWrite === true);
+  const nextBoard = mapBoardRow(boardRow);
+  await restorePending(control, nextBoard.effectiveCanWrite === true);
+  if (control.disposed || (control.hydrated && nextBoard.currentRevision < control.revision)) return;
+  control.boardData = nextBoard;
+  control.revision = Number(nextBoard.currentRevision || 0);
   control.shards.clear();
   for (const row of shardRows || []) {
     control.shards.set(row.shard_id, shardMapFromRow(row));
@@ -778,8 +794,9 @@ function disposeControlIfIdle(control: BoardControl): void {
   const retriesExhausted = control.retryAttempt >= MAX_AUTO_RETRY_ATTEMPTS && !control.retryTimer;
   if (
     control.subscribers.size === 0 &&
-    (control.pendingMutations.size === 0 || retriesExhausted) &&
+    (control.pendingMutations.size === 0 || (retriesExhausted && control.locallyDurable)) &&
     !control.flushPromise &&
+    !control.manifestRefreshPromise && !control.recoveryPromise &&
     !control.pendingPersistPromise
   ) {
     // Unsynced mutations remain in the project/user/board-scoped IndexedDB key.
@@ -858,13 +875,64 @@ function applyEffectivePermission(
   notify(control);
 }
 
+async function recoverBoard(control: BoardControl): Promise<void> {
+  if (control.disposed || control.recoveryPromise) return control.recoveryPromise || Promise.resolve();
+  control.recoveryPromise = (async () => {
+    if (!control.hydrated) await control.hydrationPromise;
+    if (control.disposed) return;
+    if (control.loadState === 'error') {
+      await fetchBoardAndAllShards(control);
+    } else {
+      const { data, error } = await supabase.from('boards')
+        .select('current_revision,changed_shard_ids,deleted_shard_ids,total_elements,updated_at')
+        .eq('id', control.boardId).maybeSingle();
+      if (error || !data) throw error || new Error('Board access unavailable.');
+      if (control.disposed) return;
+      enqueueManifestRefresh(control, {
+        revision: Number(data.current_revision),
+        changedShardIds: data.changed_shard_ids || [], deletedShardIds: data.deleted_shard_ids || [],
+        boardData: { ...control.boardData, currentRevision: Number(data.current_revision),
+          totalElements: Number(data.total_elements), updatedAt: Number(data.updated_at) },
+      });
+    }
+    if (control.pendingMutations.size && control.boardData?.effectiveCanWrite) {
+      control.retryAttempt = 0; clearRetryTimer(control);
+      runScheduledFlush(control, 'connection-recovery');
+    }
+  })().catch((error) => {
+    emitSyncStatus(control.boardId, control.locallyDurable ? 'offline' : 'failed', error);
+  }).finally(() => { control.recoveryPromise = null; disposeControlIfIdle(control); });
+  return control.recoveryPromise;
+}
+
 function startPersistenceSocket(control: BoardControl): void {
   if (control.socketMessageUnsubscribe || isSandboxEnvironment()) return;
+  const online = () => { void recoverBoard(control); };
+  const visible = () => { if (document.visibilityState === 'visible') online(); };
+  window.addEventListener('online', online);
+  document.addEventListener('visibilitychange', visible);
+  const beforeUnload = (event: BeforeUnloadEvent) => {
+    if (control.pendingMutations.size > 0 && !control.locallyDurable) {
+      event.preventDefault(); event.returnValue = '';
+    }
+  };
+  window.addEventListener('beforeunload', beforeUnload);
+  const authSubscription = supabase.auth.onAuthStateChange((event) => {
+    if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') queueMicrotask(online);
+  });
+  control.recoveryUnsubscribe = () => {
+    window.removeEventListener('online', online);
+    document.removeEventListener('visibilitychange', visible);
+    window.removeEventListener('beforeunload', beforeUnload);
+    authSubscription.data.subscription.unsubscribe();
+  };
 
   control.socketStatusUnsubscribe = subscribeBoardSocketStatus(control.boardId, (status) => {
+    const recovered = status.authenticated && !control.socketAuthenticated;
     control.socketAuthenticated = status.authenticated;
     if (status.authenticated) {
       applyEffectivePermission(control, status.permission, status.canWrite, status.canManage);
+      if (recovered) void recoverBoard(control);
     }
   });
 
@@ -980,9 +1048,7 @@ export function subscribeToBoardState(
       .catch((error) => {
         console.error('Supabase board load failed:', error);
         const message = error instanceof Error ? error.message : String(error);
-        if (/access denied|permission denied|not found/i.test(message)) {
-          void deleteBoardRecoveryCache(boardId);
-        }
+        // Authorization failure must not destroy an account's recoverable edits.
         control.loadState = 'error';
         control.loadError = message;
         if (!control.hydrated) {
@@ -1006,12 +1072,12 @@ function runScheduledFlush(control: BoardControl, reason: string): void {
     .then(() => {
       control.retryAttempt = 0;
       clearRetryTimer(control);
-      emitSyncStatus(control.boardId, 'synced');
+      emitSyncStatus(control.boardId, getBoardSaveStatus(control.boardId));
       disposeControlIfIdle(control);
     })
     .catch((error) => {
       console.error(`Supabase board checkpoint failed (${reason}):`, error);
-      emitSyncStatus(control.boardId, 'offline', error);
+      emitSyncStatus(control.boardId, control.locallyDurable ? 'offline' : 'failed', error);
       scheduleRetry(control);
       disposeControlIfIdle(control);
     });
@@ -1074,12 +1140,15 @@ export function queueElementMutation(
     updatedByClientId: updatedByClientId || auth.currentUser?.uid || 'local-client',
   };
   control.pendingMutations.set(elementId, mutation);
-  void persistPending(control);
+  control.locallyDurable = false;
+  emitSyncStatus(boardId, 'pending-local');
+  void persistPending(control).then(() => {
+    if (!control.disposed) emitSyncStatus(boardId, control.pendingMutations.size ? 'saved-local' : 'synced');
+  }).catch(() => { /* persistPending reports failure; retain the in-memory queue */ });
 
   if (action === 'delete') control.currentElements.delete(elementId);
   else if (clean) control.currentElements.set(elementId, clean);
   notify(control);
-  emitSyncStatus(boardId, 'saved-local');
 
   if (isSandboxEnvironment()) {
     saveSandboxLocalElements(boardId, Array.from(control.currentElements.values()));
@@ -1111,6 +1180,7 @@ export function mergeRemoteElementData(
 
 export function applyRemoteOperation(boardId: string, operation: RemoteOperation): void {
   const control = getOrCreateControl(boardId);
+  if (operation.baseRevision < control.revision) return;
   if (control.appliedOperationIds.has(operation.operationId)) return;
   control.appliedOperationIds.add(operation.operationId);
   if (control.appliedOperationIds.size > 2_000) {
@@ -1170,7 +1240,8 @@ export async function flushBoardCheckpoint(boardId: string, _reason: string = 'm
     return;
   }
   if (control.pendingMutations.size === 0) return;
-  await persistPending(control);
+  // Cloud saving remains possible when browser storage is unavailable.
+  await persistPending(control).catch(() => undefined);
   if (control.flushPromise) {
     control.nextFlushRequested = true;
     return control.flushPromise;
@@ -1210,13 +1281,18 @@ export async function flushBoardCheckpoint(boardId: string, _reason: string = 'm
       if (error) throw new Error(error.message);
 
       const result = data as any;
+      if (control.disposed) return;
+      const resultRevision = Number(result?.revision || control.revision);
+      const missingRevisions = resultRevision > control.revision + 1;
       const returnedShards = result?.shards || {};
-      for (const [shardId, elements] of Object.entries(returnedShards)) {
-        control.shards.set(shardId, shardMapFromRow({ elements }));
+      if (resultRevision >= control.revision && !missingRevisions) {
+        for (const [shardId, elements] of Object.entries(returnedShards)) {
+          control.shards.set(shardId, shardMapFromRow({ elements }));
+        }
+        for (const shardId of result?.deletedShardIds || []) control.shards.delete(shardId);
       }
-      for (const shardId of result?.deletedShardIds || []) control.shards.delete(shardId);
 
-      control.revision = Number(result?.revision || control.revision);
+      if (!missingRevisions) control.revision = Math.max(control.revision, resultRevision);
       control.boardData = {
         ...(control.boardData || {}),
         currentRevision: control.revision,
@@ -1243,22 +1319,21 @@ export async function flushBoardCheckpoint(boardId: string, _reason: string = 'm
       }
       control.committedGeneration = highestCommittedGeneration;
       await persistPending(control);
+      if (missingRevisions) await fetchBoardAndAllShards(control);
       rebuildCurrentElements(control);
       trackOperation('tx_commit', 'supabase-board-checkpoint-rpc', 1);
       trackOperation('write', 'supabase-affected-shards', (result?.changedShardIds || []).length);
       trackOperation('write', 'supabase-board-manifest', 1);
       notify(control);
 
-      if (control.socketAuthenticated) {
-        sendBoardSocketMessage(boardId, {
+      sendBoardSocketMessage(boardId, {
           type: 'board_manifest_changed',
           revision: control.revision,
           changedShardIds: result?.changedShardIds || [],
           deletedShardIds: result?.deletedShardIds || [],
           totalElements: Number(result?.totalElements || 0),
           updatedAt: Date.now(),
-        });
-      }
+      });
     }
     control.retryAttempt = 0;
     clearRetryTimer(control);
@@ -1304,9 +1379,12 @@ export async function flushAllBoardCheckpoints(
   const results = await Promise.allSettled(
     controls.map((control) => flushBoardCheckpoint(control.boardId, reason))
   );
-  const pendingBoards = results.flatMap((result, index) =>
-    result.status === 'rejected' ? [controls[index].boardId] : []
-  );
+  const pendingBoards = results.flatMap((result, index) => {
+    const control = controls[index];
+    return result.status === 'rejected' || control.pendingMutations.size > 0 ||
+      !control.locallyDurable || control.pendingPersistPromise
+      ? [control.boardId] : [];
+  });
   return { flushed: pendingBoards.length === 0, pendingBoards };
 }
 
@@ -1314,6 +1392,13 @@ export function getPendingCheckpointBoardIds(): string[] {
   return Array.from(activeControls.values())
     .filter((control) => !control.disposed && control.pendingMutations.size > 0)
     .map((control) => control.boardId);
+}
+export function getBoardSaveStatus(boardId: string): 'synced' | 'pending-local' | 'saved-local' | 'failed' {
+  const control = activeControls.get(boardId);
+  if (!control) return 'synced';
+  if (control.pendingPersistPromise) return 'pending-local';
+  if (!control.locallyDurable) return 'failed';
+  return control.pendingMutations.size > 0 ? 'saved-local' : 'synced';
 }
 
 export async function initializeBoardWithElements(
@@ -1384,6 +1469,7 @@ export function disposeBoardPersistence(boardId?: string): void {
     control.socketAuthenticated = false;
     control.socketMessageUnsubscribe?.();
     control.socketStatusUnsubscribe?.();
+    control.recoveryUnsubscribe?.();
     control.socketMessageUnsubscribe = null;
     control.socketStatusUnsubscribe = null;
     control.pendingManifestRefresh = null;

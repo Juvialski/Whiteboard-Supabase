@@ -24,10 +24,7 @@ type StatusListener = (status: BoardSocketStatus) => void;
 const CONNECTING_STATE = 0;
 const OPEN_STATE = 1;
 const CLOSED_STATE = 3;
-// Only a manifest notification is safe to replay after reconnection: it tells
-// peers to fetch the authoritative database state. Replaying stale cursor,
-// element, timer, follow, or drawing-stream events can visually overwrite newer
-// work even though the database is correct.
+// Replay notifications only; never replay transient element, cursor, or legacy timer state.
 const DURABLE_TYPES = new Set(['board_manifest_changed', 'board_settings_changed']);
 const DISPOSE_DELAY_MS = 1_500;
 
@@ -320,9 +317,10 @@ class BoardSocketChannel {
       return;
     }
 
-    if (DURABLE_TYPES.has(message.type)) {
+    const timerNotification = message.type === 'timer_sync' && Number.isSafeInteger(message.revision) && message.state === undefined;
+    if (DURABLE_TYPES.has(message.type) || timerNotification) {
       const existing = this.queuedDurableMessages.get(message.type);
-      if (message.type !== 'board_manifest_changed' || !existing || Number(message.revision || 0) >= Number(existing.revision || 0)) {
+      if ((message.type !== 'board_manifest_changed' && !timerNotification) || !existing || Number(message.revision || 0) >= Number(existing.revision || 0)) {
         // Keep only the newest authoritative notification of each durable type.
         this.queuedDurableMessages.set(message.type, message);
       }

@@ -224,5 +224,19 @@ describe('boardSocketService connection sharing', () => {
     })).not.toThrow();
     service.closeBoardSocket('board-listener-error');
   });
+  it('queues only revision timer notifications and coalesces revisions across reconnect', async () => {
+    global.WebSocket = TrackingWebSocket as unknown as typeof WebSocket;
+    const service = await import('./boardSocketService');
+    const unsubscribe = service.subscribeBoardSocketMessages('timer-recovery', () => {});
+    service.sendBoardSocketMessage('timer-recovery', { type: 'timer_sync', state: { isRunning: true } });
+    service.sendBoardSocketMessage('timer-recovery', { type: 'timer_sync', revision: 4 });
+    service.sendBoardSocketMessage('timer-recovery', { type: 'timer_sync', revision: 2 });
+    await vi.waitFor(() => expect(TrackingWebSocket.instances[0]?.sent.length).toBe(1));
+    const socket = TrackingWebSocket.instances[0];
+    socket.receive({ type: 'authenticated', boardId: 'timer-recovery', permission: 'editor', canWrite: true });
+    await vi.waitFor(() => expect(socket.sent.length).toBe(2));
+    expect(JSON.parse(socket.sent[1])).toEqual({ type: 'timer_sync', revision: 4 });
+    unsubscribe();
+  });
 
 });

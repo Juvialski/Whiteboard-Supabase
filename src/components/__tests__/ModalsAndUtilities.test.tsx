@@ -8,11 +8,16 @@ import VoiceRecordModal from '../VoiceRecordModal';
 import ClearCanvasModal from '../ClearCanvasModal';
 import KeyboardShortcutsModal from '../KeyboardShortcutsModal';
 import { BoardElement } from '../../types';
+import type { TimerState } from '../../services/timerState';
+const timerState: TimerState = { board_id: 'test', mode: 'timer', running: false,
+  baseline_ms: 300000, total_seconds: 300, started_at: null, visible: true,
+  completed: false, revision: 0, run_id: 0 };
 
 describe('Modals & Workspace Utilities Test Suite', () => {
   describe('WorkspaceTimer Component', () => {
     it('renders timer modal when open and toggles play/pause state', () => {
-      render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} />);
+      const onAction = vi.fn().mockResolvedValue(undefined);
+      const { rerender } = render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} state={timerState} serverNow={() => 1000} onAction={onAction} />);
 
       expect(screen.getByText('Sprint Timer')).toBeTruthy();
       expect(screen.getByDisplayValue('05')).toBeTruthy();
@@ -20,23 +25,31 @@ describe('Modals & Workspace Utilities Test Suite', () => {
       const startBtn = screen.getByText('Start');
       fireEvent.click(startBtn);
 
+      expect(onAction).toHaveBeenCalledWith('start', undefined);
+      expect(screen.getByText('Start')).toBeTruthy();
+      rerender(<WorkspaceTimer isOpen={true} onClose={vi.fn()} state={{...timerState, running: true, started_at: new Date(1000).toISOString()}} serverNow={() => 1000} onAction={onAction} />);
       expect(screen.getByText('Pause')).toBeTruthy();
     });
 
     it('allows switching between timer and stopwatch mode', () => {
-      render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} />);
+      const onAction = vi.fn().mockResolvedValue(undefined);
+      const { rerender } = render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} state={timerState} serverNow={() => 1000} onAction={onAction} />);
 
       const stopwatchTab = screen.getByText('Stopwatch');
       fireEvent.click(stopwatchTab);
+      expect(onAction).toHaveBeenCalledWith('mode', 1);
+      rerender(<WorkspaceTimer isOpen={true} onClose={vi.fn()} state={{...timerState, mode: 'stopwatch', baseline_ms: 0}} serverNow={() => 1000} onAction={onAction} />);
 
       expect(screen.getByText('00:00')).toBeTruthy();
     });
 
     it('resets time when reset button is clicked', () => {
-      render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} />);
+      const onAction = vi.fn().mockResolvedValue(undefined);
+      render(<WorkspaceTimer isOpen={true} onClose={vi.fn()} state={timerState} serverNow={() => 1000} onAction={onAction} />);
 
       const resetBtn = screen.getByTitle('Reset Timer');
       fireEvent.click(resetBtn);
+      expect(onAction).toHaveBeenCalledWith('reset', undefined);
 
       expect(screen.getByDisplayValue('05')).toBeTruthy();
       expect(screen.getByDisplayValue('00')).toBeTruthy();

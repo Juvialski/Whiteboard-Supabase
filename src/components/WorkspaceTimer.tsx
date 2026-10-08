@@ -1,357 +1,95 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, RotateCcw, Plus, Clock, Timer as TimerIcon, Volume2, VolumeX, X, Minus, Sparkles } from 'lucide-react';
+import { timerSeconds, timerCompleted, type TimerState, type TimerAction } from '../services/timerState';
+import { TimerAudio, soundPreference, saveSoundPreference, claimCompletion } from '../services/timerAudio';
+import { getScopedBoardCacheKey } from '../utils/boardRecoveryCache';
 
 interface WorkspaceTimerProps {
   isOpen: boolean;
   onClose: () => void;
-  // Optional sync callbacks
-  onTimerSync?: (state: { isRunning: boolean; mode: 'timer' | 'stopwatch'; remainingSeconds: number; totalSeconds: number; startedAt?: number | null }) => void;
-  syncedState?: { isRunning: boolean; mode: 'timer' | 'stopwatch'; remainingSeconds: number; totalSeconds: number; startedAt?: number | null } | null;
+  state: TimerState | null;
+  serverNow: () => number;
+  onAction: (action: TimerAction, value?: number) => Promise<void>;
+  error?: string | null;
+  busy?: boolean;
   isReadOnly?: boolean;
 }
-
-export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedState, isReadOnly = false }: WorkspaceTimerProps) {
-  const [mode, setMode] = useState<'timer' | 'stopwatch'>('timer');
-  const [totalSeconds, setTotalSeconds] = useState<number>(300); // 5 mins default
-  const [remainingSeconds, setRemainingSeconds] = useState<number>(300);
-  const [stopwatchSeconds, setStopwatchSeconds] = useState<number>(0);
-  const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [startedAt, setStartedAt] = useState<number | null>(null);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [isMinimized, setIsMinimized] = useState<boolean>(false);
-  const [, setTick] = useState<number>(0);
-
-  // Time editing inputs state
-  const [minInput, setMinInput] = useState<string>('05');
-  const [secInput, setSecInput] = useState<string>('00');
-  const [isEditingTime, setIsEditingTime] = useState<boolean>(false);
-
-  const audioCtxRef = useRef<AudioContext | null>(null);
-
-  // Stable ref for onTimerSync to prevent tearing down interval when parent re-renders
-  const onTimerSyncRef = useRef(onTimerSync);
+export default function WorkspaceTimer({ isOpen, onClose, state, serverNow, onAction, error, busy, isReadOnly = false }: WorkspaceTimerProps) {
+  const [soundEnabled, setSoundEnabled] = useState(soundPreference);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+  const [, setTick] = useState(0);
+  const [minInput, setMinInput] = useState('05');
+  const [secInput, setSecInput] = useState('00');
+  const [isEditingTime, setIsEditingTime] = useState(false);
+  const audio = useRef<TimerAudio | null>(null);
+  if (!audio.current) audio.current = new TimerAudio();
   useEffect(() => {
-    onTimerSyncRef.current = onTimerSync;
-  }, [onTimerSync]);
-
-  // Keep minute and second text inputs synced when not actively editing
+    // StrictMode cleans up and re-runs effects, so recreate resources on setup.
+    audio.current ??= new TimerAudio();
+    return () => { const previous = audio.current; audio.current = null; void previous?.close(); };
+  }, []);
+  const currentDisplaySeconds = state ? timerSeconds(state, serverNow()) : 300;
+  const completed = state ? timerCompleted(state, serverNow()) : false;
+  const mode = state?.mode || 'timer';
+  const totalSeconds = state?.total_seconds ?? 300;
+  const isRunning = !!state?.running && !completed;
+  const controlsDisabled = isReadOnly || busy || !state;
+  useEffect(() => {
+    if (!state?.running) return;
+    const interval = setInterval(() => setTick(value => value + 1), 250);
+    const resume = () => setTick(value => value + 1);
+    document.addEventListener('visibilitychange', resume);
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', resume); };
+  }, [state?.running]);
   useEffect(() => {
     if (!isEditingTime) {
-      const m = Math.floor(remainingSeconds / 60);
-      const s = remainingSeconds % 60;
-      setMinInput(m.toString().padStart(2, '0'));
-      setSecInput(s.toString().padStart(2, '0'));
+      setMinInput(Math.floor(currentDisplaySeconds / 60).toString().padStart(2, '0'));
+      setSecInput((currentDisplaySeconds % 60).toString().padStart(2, '0'));
     }
-  }, [remainingSeconds, isEditingTime]);
-
-  // Sync with remote timer if broadcasted
-  const prevSyncedStateRef = useRef<any>(null);
+  }, [currentDisplaySeconds, isEditingTime]);
   useEffect(() => {
-    if (syncedState) {
-      const isDiff =
-        !prevSyncedStateRef.current ||
-        prevSyncedStateRef.current.isRunning !== syncedState.isRunning ||
-        prevSyncedStateRef.current.mode !== syncedState.mode ||
-        prevSyncedStateRef.current.remainingSeconds !== syncedState.remainingSeconds ||
-        prevSyncedStateRef.current.totalSeconds !== syncedState.totalSeconds ||
-        prevSyncedStateRef.current.startedAt !== syncedState.startedAt;
-
-      if (isDiff) {
-        prevSyncedStateRef.current = syncedState;
-        setIsRunning(syncedState.isRunning);
-        setMode(syncedState.mode);
-
-        let validStartedAt: number | null = null;
-        if (syncedState.isRunning) {
-          const raw = syncedState.startedAt;
-          const parsed = typeof raw === 'number' ? raw : Number(raw);
-          validStartedAt = parsed && !isNaN(parsed) && parsed > 0 ? parsed : Date.now();
-        }
-        setStartedAt(validStartedAt);
-
-        if (syncedState.mode === 'timer') {
-          setRemainingSeconds(syncedState.remainingSeconds);
-          setTotalSeconds(syncedState.totalSeconds);
-        } else {
-          setStopwatchSeconds(syncedState.remainingSeconds);
-        }
-      }
+    if (!completed || !state) return;
+    const identity = getScopedBoardCacheKey('pending', state.board_id);
+    if (!identity) return;
+    if (claimCompletion('timer_alarm_' + identity + '_' + state.run_id)) {
+      if (soundEnabled && !audio.current?.play()) setAudioBlocked(true);
     }
-  }, [syncedState]);
-
-  // Audio synthesizer for sound alert when countdown finishes
-  const playSoundAlert = () => {
-    if (!soundEnabled) return;
-    try {
-      if (!audioCtxRef.current) {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          audioCtxRef.current = new AudioCtx();
-        }
-      }
-      const ctx = audioCtxRef.current;
-      if (ctx) {
-        if (ctx.state === 'suspended') {
-          ctx.resume();
-        }
-
-        const now = ctx.currentTime;
-        // Play a pleasant double-chime bell chord (E5 & B5 then G#5)
-        const freqs = [659.25, 987.77, 830.61];
-        freqs.forEach((freq, idx) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(freq, now + idx * 0.15);
-          gain.gain.setValueAtTime(0.3, now + idx * 0.15);
-          gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.15 + 0.8);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(now + idx * 0.15);
-          osc.stop(now + idx * 0.15 + 0.8);
-        });
-      }
-    } catch (e) {
-      console.error('Audio alert playback error:', e);
-    }
+  }, [completed, state?.run_id, state?.board_id, soundEnabled]);
+  const unlock = async (test = false) => {
+    const allowed = await audio.current?.unlock();
+    setAudioBlocked(!allowed || (test && !audio.current?.play()));
   };
-
-  // Calculate current seconds dynamically with millisecond precision
-  const getCurrentDisplaySeconds = () => {
-    if (!isRunning) {
-      return mode === 'timer' ? remainingSeconds : stopwatchSeconds;
-    }
-    const parsedStartedAt = typeof startedAt === 'number' ? startedAt : Number(startedAt);
-    const effectiveStartedAt =
-      parsedStartedAt && !isNaN(parsedStartedAt) && parsedStartedAt > 0
-        ? parsedStartedAt
-        : Date.now();
-
-    const elapsedMs = Math.max(0, Date.now() - effectiveStartedAt);
-    if (mode === 'timer') {
-      const remainingMs = remainingSeconds * 1000 - elapsedMs;
-      return Math.max(0, Math.ceil(remainingMs / 1000));
-    } else {
-      const elapsedSecs = Math.floor(elapsedMs / 1000);
-      return stopwatchSeconds + elapsedSecs;
-    }
+  const action = (name: TimerAction, value?: number) => {
+    if (controlsDisabled) return;
+    if (soundEnabled) void unlock();
+    void onAction(name, value);
   };
-
-  // Main tick timer loop (100ms interval for smooth rendering and completion checks)
-  useEffect(() => {
-    if (!isRunning) return;
-
-    const interval = setInterval(() => {
-      setTick((t) => t + 1);
-
-      // Ensure effectiveStartedAt is populated if missing while running
-      const parsedStartedAt = typeof startedAt === 'number' ? startedAt : Number(startedAt);
-      const effectiveStartedAt =
-        parsedStartedAt && !isNaN(parsedStartedAt) && parsedStartedAt > 0
-          ? parsedStartedAt
-          : Date.now();
-
-      // Check if the countdown timer has completed
-      if (mode === 'timer') {
-        const elapsedMs = Date.now() - effectiveStartedAt;
-        const currentLeftMs = remainingSeconds * 1000 - elapsedMs;
-        if (currentLeftMs <= 0) {
-          setIsRunning(false);
-          setStartedAt(null);
-          setRemainingSeconds(0);
-          playSoundAlert();
-          if (onTimerSyncRef.current) {
-            onTimerSyncRef.current({
-              isRunning: false,
-              mode: 'timer',
-              remainingSeconds: 0,
-              totalSeconds,
-              startedAt: null
-            });
-          }
-        }
-      }
-    }, 100);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [isRunning, startedAt, mode, remainingSeconds, totalSeconds]);
-
-  if (!isOpen) return null;
-
-  const handleStartPause = () => {
-    const nextIsRunning = !isRunning;
-    const now = Date.now();
-    const nextStartedAt = nextIsRunning ? now : null;
-
-    let currentRemaining = remainingSeconds;
-    let currentStopwatch = stopwatchSeconds;
-
-    if (!nextIsRunning) {
-      // Freeze at precisely calculated current values on pause
-      const parsedStartedAt = typeof startedAt === 'number' ? startedAt : Number(startedAt);
-      const effectiveStartedAt =
-        parsedStartedAt && !isNaN(parsedStartedAt) && parsedStartedAt > 0
-          ? parsedStartedAt
-          : now;
-      const elapsedMs = Math.max(0, now - effectiveStartedAt);
-      if (mode === 'timer') {
-        const remainingMs = Math.max(0, remainingSeconds * 1000 - elapsedMs);
-        currentRemaining = Math.max(0, Math.ceil(remainingMs / 1000));
-      } else {
-        const elapsedSecs = Math.floor(elapsedMs / 1000);
-        currentStopwatch = stopwatchSeconds + elapsedSecs;
-      }
-      setRemainingSeconds(currentRemaining);
-      setStopwatchSeconds(currentStopwatch);
-    }
-
-    setIsRunning(nextIsRunning);
-    setStartedAt(nextStartedAt);
-
-    if (onTimerSyncRef.current) {
-      onTimerSyncRef.current({
-        isRunning: nextIsRunning,
-        mode,
-        remainingSeconds: mode === 'timer' ? currentRemaining : currentStopwatch,
-        totalSeconds,
-        startedAt: nextStartedAt
-      });
-    }
-  };
-
-  const handleReset = () => {
-    setIsRunning(false);
-    setStartedAt(null);
-    if (mode === 'timer') {
-      setRemainingSeconds(totalSeconds);
-    } else {
-      setStopwatchSeconds(0);
-    }
-    if (onTimerSyncRef.current) {
-      onTimerSyncRef.current({
-        isRunning: false,
-        mode,
-        remainingSeconds: mode === 'timer' ? totalSeconds : 0,
-        totalSeconds,
-        startedAt: null
-      });
-    }
-  };
-
-  const handlePreset = (seconds: number) => {
-    setIsRunning(false);
-    setStartedAt(null);
-    setTotalSeconds(seconds);
-    setRemainingSeconds(seconds);
-    setMode('timer');
-    if (onTimerSyncRef.current) {
-      onTimerSyncRef.current({
-        isRunning: false,
-        mode: 'timer',
-        remainingSeconds: seconds,
-        totalSeconds: seconds,
-        startedAt: null
-      });
-    }
-  };
-
-  const handleAddSeconds = (secs: number) => {
-    const now = Date.now();
-
-    if (mode === 'timer') {
-      let currentLeftSecs = remainingSeconds;
-      if (isRunning && startedAt) {
-        const elapsedMs = now - startedAt;
-        const remainingMs = Math.max(0, remainingSeconds * 1000 - elapsedMs);
-        currentLeftSecs = Math.max(0, Math.ceil(remainingMs / 1000));
-      }
-
-      const next = Math.max(0, currentLeftSecs + secs);
-      const nextTotal = Math.max(next, secs > 0 ? totalSeconds + secs : totalSeconds);
-
-      setRemainingSeconds(next);
-      setTotalSeconds(nextTotal);
-      if (isRunning) {
-        setStartedAt(now);
-      }
-
-      if (onTimerSyncRef.current) {
-        onTimerSyncRef.current({
-          isRunning,
-          mode: 'timer',
-          remainingSeconds: next,
-          totalSeconds: nextTotal,
-          startedAt: isRunning ? now : null
-        });
-      }
-    } else {
-      let currentStopwatch = stopwatchSeconds;
-      if (isRunning && startedAt) {
-        const elapsedSecs = Math.floor((now - startedAt) / 1000);
-        currentStopwatch = stopwatchSeconds + elapsedSecs;
-      }
-
-      const next = Math.max(0, currentStopwatch + secs);
-      setStopwatchSeconds(next);
-      if (isRunning) {
-        setStartedAt(now);
-      }
-
-      if (onTimerSyncRef.current) {
-        onTimerSyncRef.current({
-          isRunning,
-          mode: 'stopwatch',
-          remainingSeconds: next,
-          totalSeconds,
-          startedAt: isRunning ? now : null
-        });
-      }
-    }
-  };
-
+  const handleStartPause = () => action(isRunning ? 'pause' : 'start');
+  const handleReset = () => { setAudioBlocked(false); action('reset'); };
+  const handlePreset = (seconds: number) => action('duration', seconds);
+  const handleAddSeconds = (seconds: number) => action('adjust', seconds);
   const commitTimeInput = () => {
+    if (!isEditingTime) return;
     setIsEditingTime(false);
-    const parsedMins = Math.min(99, Math.max(0, parseInt(minInput) || 0));
-    const parsedSecs = Math.min(59, Math.max(0, parseInt(secInput) || 0));
-    const next = parsedMins * 60 + parsedSecs;
-    setRemainingSeconds(next);
-    setTotalSeconds(next);
-    setMinInput(parsedMins.toString().padStart(2, '0'));
-    setSecInput(parsedSecs.toString().padStart(2, '0'));
-    if (onTimerSyncRef.current) {
-      onTimerSyncRef.current({
-        isRunning: false,
-        mode: 'timer',
-        remainingSeconds: next,
-        totalSeconds: next,
-        startedAt: null
-      });
-    }
+    const minutes = Math.min(99, Math.max(0, parseInt(minInput) || 0));
+    const seconds = Math.min(59, Math.max(0, parseInt(secInput) || 0));
+    action('duration', minutes * 60 + seconds);
   };
-
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  const currentDisplaySeconds = getCurrentDisplaySeconds();
-
-  // Progress ring math
-  const progress = mode === 'timer' && totalSeconds > 0 ? (currentDisplaySeconds / totalSeconds) : 1;
+  const formatTime = (secs: number) => Math.floor(secs / 60).toString().padStart(2, '0') + ':' + (secs % 60).toString().padStart(2, '0');
+  const progress = mode === 'timer' && totalSeconds > 0 ? Math.min(1, currentDisplaySeconds / totalSeconds) : 1;
   const radius = 38;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - progress * circumference;
-
-  // Ring status color
-  const ringColor = mode === 'timer' && currentDisplaySeconds <= 10
-    ? 'text-rose-500'
-    : mode === 'timer' && currentDisplaySeconds <= 30
-    ? 'text-amber-500'
-    : 'text-indigo-600';
-
+  const ringColor = mode === 'timer' && currentDisplaySeconds <= 10 ? 'text-rose-500'
+    : mode === 'timer' && currentDisplaySeconds <= 30 ? 'text-amber-500' : 'text-indigo-600';
+  if (!isOpen) return completed ? (
+    <div role="status" className="fixed bottom-6 right-6 z-50 bg-white rounded-xl shadow-lg border border-rose-300 p-3 text-xs">
+      <span className="text-rose-600 font-bold">Time is up{audioBlocked ? ' — sound unavailable' : ''}</span>
+      <button className="ml-2 text-indigo-600" onClick={() => void unlock(true)}>Test Sound</button>
+      {!isReadOnly && <button className="ml-2" disabled={busy} onClick={handleReset}>Reset</button>}
+    </div>
+  ) : null;
   return (
     <div className="fixed bottom-18 sm:bottom-6 right-3 sm:right-6 z-50 animate-scale-up select-none pointer-events-auto max-w-[calc(100vw-1.5rem)]">
       <div className="bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-2xl rounded-3xl overflow-hidden w-72 max-w-full transition-all">
@@ -371,7 +109,7 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
 
           <div className="flex items-center space-x-1">
             <button
-              onClick={() => setSoundEnabled(!soundEnabled)}
+              onClick={() => { const enabled = !soundEnabled; setSoundEnabled(enabled); saveSoundPreference(enabled); if (enabled) void unlock(); else void audio.current?.close(); }}
               className="p-1 hover:bg-slate-800 rounded-lg text-slate-300 hover:text-white transition-colors cursor-pointer"
               title={soundEnabled ? 'Mute Sound Alert' : 'Enable Sound Alert'}
             >
@@ -395,17 +133,22 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
             )}
           </div>
         </div>
+        {isMinimized && completed && <div role="status" className="p-2 text-xs text-rose-600">Time is up{audioBlocked ? ' — sound unavailable' : ''}</div>}
 
         {!isMinimized && (
           <div className="p-4 flex flex-col items-center">
+            <button type="button" onClick={() => void unlock(true)} className="text-xs text-indigo-600 mb-2">Test Sound</button>
+            {completed && <div role="status" className="text-rose-600 text-xs font-bold mb-2">Time is up{audioBlocked ? ' — sound unavailable; use Test Sound' : ''}</div>}
+            {audioBlocked && !completed && <div role="status" className="text-xs mb-2">Sound unavailable. Check browser and tab audio settings.</div>}
+            {error && <div role="alert" className="text-rose-600 text-xs mb-2">{error}</div>}
+            {busy && <div role="status" className="text-xs mb-2">Saving timer…</div>}
+            <fieldset disabled={controlsDisabled} className="contents">
             {/* Mode Selector Tabs */}
             {!isReadOnly ? (
               <div className="flex items-center bg-slate-100 p-1 rounded-xl w-full mb-3 text-xs font-bold">
                 <button
                   onClick={() => {
-                    setMode('timer');
-                    setIsRunning(false);
-                    setStartedAt(null);
+                    action('mode', 0);
                   }}
                   className={`flex-1 py-1 rounded-lg transition-all cursor-pointer ${
                     mode === 'timer' ? 'bg-white text-indigo-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
@@ -415,9 +158,7 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
                 </button>
                 <button
                   onClick={() => {
-                    setMode('stopwatch');
-                    setIsRunning(false);
-                    setStartedAt(null);
+                    action('mode', 1);
                   }}
                   className={`flex-1 py-1 rounded-lg transition-all cursor-pointer ${
                     mode === 'stopwatch' ? 'bg-white text-indigo-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'
@@ -468,7 +209,9 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
                         const val = e.target.value.replace(/[^0-9]/g, '');
                         setMinInput(val);
                       }}
-                      onBlur={commitTimeInput}
+                      onBlur={(event) => {
+                        if (!(event.relatedTarget instanceof HTMLInputElement) || !event.currentTarget.parentElement?.contains(event.relatedTarget)) commitTimeInput();
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           (e.target as HTMLInputElement).blur();
@@ -488,7 +231,9 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
                         const val = e.target.value.replace(/[^0-9]/g, '');
                         setSecInput(val);
                       }}
-                      onBlur={commitTimeInput}
+                      onBlur={(event) => {
+                        if (!(event.relatedTarget instanceof HTMLInputElement) || !event.currentTarget.parentElement?.contains(event.relatedTarget)) commitTimeInput();
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           (e.target as HTMLInputElement).blur();
@@ -614,6 +359,7 @@ export default function WorkspaceTimer({ isOpen, onClose, onTimerSync, syncedSta
                 )}
               </>
             )}
+            </fieldset>
           </div>
         )}
       </div>

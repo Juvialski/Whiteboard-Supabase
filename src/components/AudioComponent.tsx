@@ -24,25 +24,36 @@ export default function AudioComponent({
   onDelete,
   currentUser,
 }: AudioComponentProps) {
-  const { data: audioDataUrl } = useBoardAsset(boardId, element.assetId, element.audioUrl);
+  const { data: audioDataUrl, loading, error: loadError, retry } = useBoardAsset(boardId, element.assetId, element.audioUrl);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playError, setPlayError] = useState<string | null>(null);
+  const playAttempt = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
+    playAttempt.current += 1;
+    setIsPlaying(false);
+    setPlayError(null);
     if (!audioDataUrl) return;
     const audio = new Audio(audioDataUrl);
     audioRef.current = audio;
 
-    audio.onended = () => setIsPlaying(false);
-    audio.onerror = () => setIsPlaying(false);
+    audio.onplaying = () => setIsPlaying(true);
+    audio.onpause = () => { playAttempt.current += 1; setIsPlaying(false); };
+    audio.onended = () => { playAttempt.current += 1; setIsPlaying(false); };
+    audio.onerror = () => { playAttempt.current += 1; setIsPlaying(false); setPlayError('Voice note could not be loaded. Retry playback.'); };
 
     return () => {
+      playAttempt.current += 1;
+      audio.onplaying = audio.onpause = audio.onended = audio.onerror = null;
       audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
       audioRef.current = null;
     };
   }, [audioDataUrl]);
 
-  const togglePlay = (e: React.MouseEvent) => {
+  const togglePlay = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!audioRef.current) return;
 
@@ -50,8 +61,18 @@ export default function AudioComponent({
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().catch((err) => console.error("Audio play error:", err));
-      setIsPlaying(true);
+      const audio = audioRef.current;
+      const attempt = ++playAttempt.current;
+      setPlayError(null);
+      try {
+        await audio.play();
+        if (attempt === playAttempt.current && audioRef.current === audio) setIsPlaying(!audio.paused);
+      } catch {
+        if (attempt === playAttempt.current && audioRef.current === audio) {
+          setIsPlaying(false);
+          setPlayError('Playback blocked or unavailable. Click Play to retry.');
+        }
+      }
     }
   };
 
@@ -76,11 +97,13 @@ export default function AudioComponent({
       <div className="bg-amber-500/95 hover:bg-amber-600 text-white backdrop-blur-md px-3.5 py-2 rounded-2xl shadow-md border border-amber-400 flex items-center space-x-3 transition-all transform hover:scale-105">
         <button
           onClick={togglePlay}
+          disabled={loading || !audioDataUrl}
           className="p-2 bg-white/20 hover:bg-white/30 rounded-xl transition-colors flex items-center justify-center shrink-0 cursor-pointer"
           title={isPlaying ? "Pause Voice Note" : "Play Voice Note"}
         >
           {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
         </button>
+        {(loadError || playError) && <button type="button" onClick={(event) => { event.stopPropagation(); retry(); }} title={loadError?.message || playError || ''} className="text-xs">Retry audio</button>}
 
         <div className="flex flex-col pr-1">
           <div className="flex items-center space-x-1.5">

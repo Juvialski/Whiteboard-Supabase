@@ -1,104 +1,100 @@
-import React, { useEffect, useState } from 'react';
-import { Collaborator, UserProfile } from '../types';
-
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import type { BoardElement, Collaborator, Point, UserProfile } from '../types';
+import {
+  cursorBadgeSize, cursorElementBounds, cursorObstacleIndex, cursorScreenPoint, cursorScreenRect,
+  placeCursorBadge, pointsCursorBounds, type CursorRect,
+} from '../utils/cursorPlacement';
 interface LiveCursorsProps {
   boardId: string;
   currentUser: UserProfile;
-  zoom?: number;
+  zoom: number;
+  panX: number;
+  panY: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  elements: BoardElement[];
   socketCollaboratorsRef?: React.MutableRefObject<Record<string, Collaborator>>;
   followedUserId?: string | null;
-  onFollowUser?: (userId: string) => void;
+  remoteDrawingsRef?: React.MutableRefObject<Record<string, { points: Point[]; width: number }>>;
+  localDrawingRef?: React.MutableRefObject<Point[]>;
+  localDrawingActiveRef?: React.MutableRefObject<boolean>;
+  localStrokeWidth?: number;
 }
-
-const CollaboratorCursor = React.memo(({
-  collaborator,
-  zoom,
-  isFollowed,
-  onFollow,
-}: {
-  collaborator: Collaborator;
-  zoom: number;
-  isFollowed?: boolean;
-  onFollow?: (userId: string) => void;
-}) => {
-  return (
-    <div
-      className="absolute pointer-events-none transition-transform duration-75"
-      style={{
-        left: collaborator.x,
-        top: collaborator.y,
-        transform: `translate(-2px, -2px) scale(${1 / zoom})`,
-        transformOrigin: 'top left',
-      }}
-    >
-      <svg
-        className="w-5 h-5 drop-shadow-md filter"
-        viewBox="0 0 24 24"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <path
-          d="M3 3V21L9.12 14.88L15.34 21L18.81 17.53L12.59 11.41L18.71 5.29L3 3Z"
-          fill={collaborator.color}
-          stroke="white"
-          strokeWidth="2"
-          strokeLinejoin="round"
-        />
-      </svg>
-      <button
-        onClick={() => onFollow?.(collaborator.id)}
-        className={`ml-4 -mt-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold text-white shadow-md select-none whitespace-nowrap pointer-events-auto cursor-pointer flex items-center space-x-1 hover:scale-105 active:scale-95 transition-all ${
-          isFollowed ? "ring-2 ring-white ring-offset-2 ring-offset-blue-600 animate-pulse" : ""
-        }`}
-        style={{ backgroundColor: collaborator.color }}
-        title={`Click to follow ${collaborator.name}`}
-      >
-        <span>{collaborator.name}</span>
-        {isFollowed && <span className="text-[9px] bg-white/30 px-1.5 py-0.2 rounded-full">Following</span>}
-      </button>
-    </div>
-  );
-});
-
+// Screen-space overlay: position follows content pan/zoom; markers retain fixed size.
 export default function LiveCursors({
-  boardId,
-  currentUser,
-  zoom = 1,
-  socketCollaboratorsRef,
-  followedUserId,
-  onFollowUser,
+  boardId, currentUser, zoom, panX, panY, viewportWidth, viewportHeight, elements,
+  socketCollaboratorsRef, followedUserId, remoteDrawingsRef,
+  localDrawingRef, localDrawingActiveRef, localStrokeWidth = 1,
 }: LiveCursorsProps) {
-  const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
-
+  const [snapshot, setSnapshot] = useState<{ boardId: string; collaborators: Collaborator[]; drawingBounds: CursorRect[] }>({
+    boardId, collaborators: [], drawingBounds: [],
+  });
+  const preferred = useRef(new Map<string, Point>());
   useEffect(() => {
-    let interval: any;
-    if (socketCollaboratorsRef) {
-      let prevSig = '';
-      interval = setInterval(() => {
-        const raw = socketCollaboratorsRef.current || {};
-        const list = (Object.values(raw) as Collaborator[]).filter(
-          (collaborator) => collaborator && collaborator.id !== currentUser.id
-        );
-        const sig = list.map(c => `${c.id}:${Math.round(c.x)},${Math.round(c.y)}`).join('|');
-        if (sig !== prevSig) {
-          prevSig = sig;
-          setCollaborators(list);
-        }
-      }, 1000 / 30);
-      return () => clearInterval(interval);
-    }
-  }, [boardId, currentUser.id, socketCollaboratorsRef]);
-
+    preferred.current.clear();
+    setSnapshot({ boardId, collaborators: [], drawingBounds: [] });
+    if (!socketCollaboratorsRef) return;
+    let previous = '';
+    const update = () => {
+      const collaborators = Object.values(socketCollaboratorsRef.current || {})
+        .filter(c => c && c.id !== currentUser.id && Number.isFinite(c.x) && Number.isFinite(c.y))
+        .map(c => ({ ...c })).sort((a, b) => a.id.localeCompare(b.id));
+      const drawingBounds = [
+        ...Object.values(remoteDrawingsRef?.current || {}).map(stream => pointsCursorBounds(stream.points, stream.width)),
+        localDrawingActiveRef?.current ? pointsCursorBounds(localDrawingRef?.current || [], localStrokeWidth) : null,
+      ].filter((rect): rect is CursorRect => !!rect);
+      const signature = JSON.stringify([collaborators.map(c => [c.id, c.x, c.y, c.name, c.color]), drawingBounds]);
+      if (signature !== previous) {
+        previous = signature; setSnapshot({ boardId, collaborators, drawingBounds });
+      }
+    };
+    update();
+    const interval = setInterval(update, 1000 / 30);
+    return () => clearInterval(interval);
+  }, [boardId, currentUser.id, socketCollaboratorsRef, remoteDrawingsRef, localDrawingRef, localDrawingActiveRef, localStrokeWidth]);
+  const view = { zoom: Math.max(0.05, zoom), panX, panY };
+  const viewport = { width: viewportWidth, height: viewportHeight };
+  const occupied = useMemo(() => {
+    const byId = new Map(elements.map(element => [element.id, element]));
+    return cursorObstacleIndex(elements.map(element => cursorElementBounds(element, byId))
+      .filter((rect): rect is CursorRect => !!rect)
+      .map(rect => cursorScreenRect(rect, { zoom: Math.max(0.05, zoom), panX, panY })), {
+        width: viewportWidth, height: viewportHeight,
+      });
+  }, [elements, zoom, panX, panY, viewportWidth, viewportHeight]);
+  const collaborators = snapshot.boardId === boardId ? snapshot.collaborators : [];
+  const points = collaborators.map(collaborator => ({ collaborator, point: cursorScreenPoint(collaborator, view) }))
+    .filter(({ point }) => point.x >= 0 && point.y >= 0 && point.x <= viewportWidth && point.y <= viewportHeight);
+  const reserved: CursorRect[] = points.map(({ point }) => ({ x: point.x - 7, y: point.y - 7, width: 14, height: 14 }));
+  const liveDrawings = snapshot.drawingBounds.map(rect => cursorScreenRect(rect, view));
+  const avoidance = { overlaps: (rect: CursorRect) => occupied.overlaps(rect) ||
+    liveDrawings.some(other => rect.x < other.x + other.width + 6 && rect.x + rect.width > other.x - 6 &&
+      rect.y < other.y + other.height + 6 && rect.y + rect.height > other.y - 6) };
+  const placements = points.map(({ collaborator, point }) => {
+    const badge = placeCursorBadge(point, cursorBadgeSize(collaborator.name), viewport, avoidance,
+      reserved, preferred.current.get(collaborator.id));
+    if (badge) {
+      reserved.push(badge); preferred.current.set(collaborator.id, { x: badge.x - point.x, y: badge.y - point.y });
+    } else preferred.current.delete(collaborator.id);
+    return { collaborator, point, badge };
+  });
   return (
-    <div className="absolute inset-0 pointer-events-none z-40" id="live-cursors-layer">
-      {collaborators.map((c) => (
-        <CollaboratorCursor
-          key={c.id}
-          collaborator={c}
-          zoom={zoom}
-          isFollowed={c.id === followedUserId}
-          onFollow={onFollowUser}
-        />
+    <div className="absolute inset-0 pointer-events-none overflow-hidden z-40" style={{ pointerEvents: 'none' }} id="live-cursors-layer" aria-hidden="true">
+      {placements.map(({ collaborator, point, badge }) => (
+        <React.Fragment key={collaborator.id}>
+          <svg data-cursor-id={collaborator.id} width="10" height="10" viewBox="0 0 10 10"
+            className="absolute pointer-events-none" style={{ left: point.x - 5, top: point.y - 5, pointerEvents: 'none', opacity: 0.65 }}
+            fill="none" stroke={collaborator.color} strokeWidth={followedUserId === collaborator.id ? 1.6 : 1.1}>
+            <circle cx="5" cy="5" r="3.5" />
+            <path d="M5 0V2M5 8V10M0 5H2M8 5H10" />
+          </svg>
+          {badge && <span data-cursor-badge={collaborator.id}
+            className="absolute pointer-events-none select-none truncate rounded text-[10px] leading-[18px] px-1"
+            style={{ left: badge.x, top: badge.y, width: badge.width, height: badge.height,
+              color: collaborator.color, backgroundColor: 'rgba(255,255,255,0.72)', pointerEvents: 'none' }}>
+            {collaborator.name}
+          </span>}
+        </React.Fragment>
       ))}
     </div>
   );

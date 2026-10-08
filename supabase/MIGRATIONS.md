@@ -6,9 +6,9 @@ this folder are the database source of truth and must be applied in filename ord
 ## Existing production project
 
 Do not rerun migrations that already succeeded. Apply only genuinely new migration
-files. The current concurrency follow-up adds
-`202608080001_free_tier_concurrency_optimizations.sql`; apply it once after the
-existing `202608070001_add_individual_member_view_only.sql` migration.
+files. STAB-1 adds `20261008230648_stab_1_timer_reliability.sql`; apply it once
+after all seven existing migrations, ending in
+`202608080001_free_tier_concurrency_optimizations.sql`.
 The application intentionally fails with a clear error when a required secure RPC
 is missing; it never falls back to direct unrestricted table access.
 
@@ -28,6 +28,7 @@ Run before committing database changes:
 ```bash
 npm run schema:generate
 npm run check:migrations
+npm run test:database
 ```
 
 ## Safety rules
@@ -37,3 +38,8 @@ npm run check:migrations
 - Keep `private.admin_users` outside the exposed API schema.
 - Keep the `board-assets` bucket private.
 - Do not hand-edit generated `supabase-schema.sql`; edit migrations and regenerate it.
+
+See [STAB-1 deployment and rollback](../docs/STAB-1-RELIABILITY.md) for the exact
+production order. Migration validation starts a temporary loopback-only Postgres
+17 cluster with synthetic auth/storage infrastructure and synthetic board data;
+it does not accept a production database URL.
