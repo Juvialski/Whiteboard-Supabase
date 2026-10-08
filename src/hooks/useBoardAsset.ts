@@ -54,6 +54,8 @@ export function useBoardAsset(
     }
 
     let isMounted = true;
+    // Do not show a previous board's asset while this identity is loading.
+    setData(fallbackInlineData || null);
     setLoading(true);
     setError(null);
 
@@ -67,6 +69,7 @@ export function useBoardAsset(
           setData(fallbackInlineData);
           setError(null);
         } else {
+          setData(null);
           setError(new Error(`Asset ${assetId} not found`));
         }
       })

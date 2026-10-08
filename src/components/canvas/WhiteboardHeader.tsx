@@ -35,7 +35,7 @@ interface WhiteboardHeaderProps {
   onBackToDashboard: () => void;
   boardName: string;
   onRenameBoard?: (newName: string) => Promise<void>;
-  syncStatus: "synced" | "saving-cloud" | "saved-local" | "offline";
+  syncStatus: "synced" | "saving-cloud" | "pending-local" | "saved-local" | "offline" | "failed";
   wsConnected: boolean;
   wsLatency: number | null;
   flushPendingChanges: () => void;
@@ -305,23 +305,24 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
               Syncing
             </span>
           )}
+          {syncStatus === "pending-local" && <span role="status" className="text-xs text-amber-700">Pending local save</span>}
           {syncStatus === "saved-local" && (
-            <span className="hidden sm:flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0" title="Changes are buffered locally and will sync when possible.">
+            <span className="hidden sm:flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0" title="Changes are durable in this browser and await cloud sync.">
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
               Local
             </span>
           )}
-          {syncStatus === "offline" && (
+          {(syncStatus === "offline" || syncStatus === "failed") && (
             <button
               onClick={() => {
                 showSyncToast("Attempting to force sync offline progress...", "info");
                 flushPendingChanges();
               }}
               className="hidden sm:flex items-center gap-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/80 px-1.5 py-0.5 rounded-full text-[9px] font-bold shrink-0"
-              title="Offline. Click to retry sync."
+              title={syncStatus === 'failed' ? 'Local save failed. Keep this tab open and retry sync.' : 'Cloud save pending. Click to retry sync.'}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
-              Offline
+              {syncStatus === "failed" ? "Save failed — retry" : "Cloud pending — retry"}
             </button>
           )}
 

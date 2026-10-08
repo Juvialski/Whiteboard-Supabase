@@ -559,6 +559,10 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
       return { ...common, elementId: message.elementId, elementData: message.actionType === "delete" ? undefined : message.elementData, actionType: message.actionType, isMerge: message.isMerge === true };
     }
     case "timer_sync": {
+      // STAB-1 clients send only a revision; state is verified below via the RPC.
+      if (Number.isSafeInteger(message.revision) && message.revision >= 0) {
+        return { ...common, revision: message.revision };
+      }
       if (payloadSize(message.state) > 8 * 1024) return null;
       const state = message.state == null
         ? { isRunning: false, mode: "timer" as const, remainingSeconds: 300, totalSeconds: 300, startedAt: null }
@@ -877,6 +881,26 @@ function configureWebSockets(): void {
             const authoritative = await getOrVerifyManifest(ws, context, Number(payload.revision));
             if (!authoritative) return;
             payload = { ...payload, ...authoritative };
+          }
+          if (payload.type === "timer_sync" && payload.revision !== undefined) {
+            const userClient = createClient(SUPABASE_URL, SUPABASE_KEY, {
+              auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+              global: { headers: { Authorization: `Bearer ${context.accessToken}` } },
+            });
+            const { data, error } = await userClient.rpc('get_board_timer', { p_board_id: context.boardId });
+            if (error || !data?.timer) return;
+            // Broadcast the newest DB revision even when two commits race in the relay.
+            // Legacy clients can observe new timer transitions during a rolling upgrade.
+            const timer = data.timer;
+            const elapsed = timer.running && timer.started_at
+              ? Math.max(0, Number(data.serverTime) - Date.parse(timer.started_at)) : 0;
+            const ms = timer.mode === 'timer' ? Math.max(0, timer.baseline_ms - elapsed)
+              : timer.baseline_ms + elapsed;
+            const running = timer.running && !(timer.mode === 'timer' && ms === 0);
+            payload = { ...payload, revision: timer.revision, isOpen: timer.visible,
+              state: { mode: timer.mode, isRunning: running,
+                remainingSeconds: timer.mode === 'timer' ? Math.ceil(ms / 1000) : Math.floor(ms / 1000),
+                totalSeconds: timer.total_seconds, startedAt: running ? Number(data.serverTime) : null } };
           }
           if (payload.type === "ping") {
             if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong", id: payload.id }));

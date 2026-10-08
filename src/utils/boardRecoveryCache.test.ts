@@ -21,6 +21,8 @@ import {
   flushBoardRecoveryCache,
 } from './boardRecoveryCache';
 import type { BoardElement } from '../types';
+import { set as idbSet, keys as idbKeys } from 'idb-keyval';
+import { migrateLegacyBoardCachesToIndexedDb } from './boardRecoveryCache';
 
 const element: BoardElement = {
   id: 'drawing-1',
@@ -88,6 +90,21 @@ describe('boardRecoveryCache account scoping', () => {
 
     setBoardRecoveryUserScope('user-b');
     expect(await hasCurrentUserPendingMutationCaches()).toBe(false);
+  });
+  it('preserves the original legacy snapshot when IndexedDB quarantine fails', async () => {
+    const key = 'whiteboard_elements_legacy-storage-failure';
+    localStorage.setItem(key, JSON.stringify([element]));
+    vi.mocked(idbSet).mockRejectedValueOnce(new Error('quota'));
+    await migrateLegacyBoardCachesToIndexedDb();
+    expect(localStorage.getItem(key)).not.toBeNull();
+    await migrateLegacyBoardCachesToIndexedDb();
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(store.get('whiteboard_recovery_v1_legacy-storage-failure')).toEqual([element]);
+  });
+  it('rejects an unreadable pending inventory so sign-out cannot treat it as empty', async () => {
+    setBoardRecoveryUserScope('user-a');
+    vi.mocked(idbKeys).mockRejectedValueOnce(new Error('storage blocked'));
+    await expect(hasCurrentUserPendingMutationCaches()).rejects.toThrow('storage blocked');
   });
 
 });
