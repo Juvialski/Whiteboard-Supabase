@@ -23,3 +23,9 @@ describe('sampleRealtimeDrawingPoints', () => {
     expect(result.map((point) => point.x)).toEqual([0, 20, 40, 60, 80, 100]);
   });
 });
+
+it('bounds completed stroke previews without mutating the full persisted drawing',async()=>{
+  const {prepareRealtimeElementData}=await import('./realtimeDrawing');
+  const drawing={id:'long-stroke',points:Array.from({length:20000},(_,i)=>({x:i,y:i/3})),color:'#000',width:2};
+  const preview=prepareRealtimeElementData(drawing);expect(preview.points).toHaveLength(900);expect(drawing.points).toHaveLength(20000);expect(preview.points[0]).toEqual(drawing.points[0]);expect(preview.points.at(-1)).toEqual(drawing.points.at(-1));expect(new TextEncoder().encode(JSON.stringify(preview)).length).toBeLessThan(64000);
+});

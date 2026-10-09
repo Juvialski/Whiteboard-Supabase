@@ -61,6 +61,8 @@ export interface StickyElement {
 }
 
 export interface ShapeElement {
+  answerCover?: boolean;
+  revealed?: boolean;
   id: string;
   type: "shape";
   shapeType: ShapeType;

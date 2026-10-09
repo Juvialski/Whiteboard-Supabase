@@ -693,7 +693,9 @@ async function drawElement(
     context.textBaseline = 'middle';
     drawWrappedText(context, element.text, element.x + 8, element.y + element.height / 2 - (element.fontSize || 16) / 2, element.width - 16, (element.fontSize || 16) * 1.25, element.height - 8, 'center');
   } else if (element.type === 'shape') {
-    drawShape(context, element);
+    if (element.answerCover) {
+      if (!element.revealed) {context.fillStyle = '#334155';context.fillRect(element.x,element.y,element.width,element.height);}
+    } else drawShape(context, element);
   } else if (element.type === 'image') {
     const source = await resolveImageSource(boardId, element);
     if (source) {
@@ -868,7 +870,7 @@ export async function renderBoardRegionToCanvas(
       const bounds = elementRect(element, elements);
       return !bounds || regionsIntersect(bounds, exportRegion);
     })
-    .sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+    .sort((a, b) => Number(a.type === 'shape' && a.answerCover === true) - Number(b.type === 'shape' && b.answerCover === true) || (a.zIndex || 0) - (b.zIndex || 0));
 
   for (const element of sorted) await drawElement(context, element, elements, boardId);
   return { canvas, region: exportRegion, scale };

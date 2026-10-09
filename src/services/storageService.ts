@@ -511,10 +511,11 @@ export async function saveBoardAsset(
   providedAssetId: string | undefined,
   base64DataUrl: string,
   contentType: string = 'image/png',
-  userId?: string
+  userId?: string,
+  preserveOriginal = false
 ): Promise<SavedAssetMeta> {
   let finalData = base64DataUrl;
-  if (contentType.startsWith('image/') && contentType !== 'image/gif' && contentType !== 'image/webp') {
+  if (!preserveOriginal && contentType.startsWith('image/') && contentType !== 'image/gif' && contentType !== 'image/webp') {
     finalData = await compressImageBase64(base64DataUrl);
   }
 
@@ -824,6 +825,39 @@ export async function deleteAssetFromStorage(
     .eq('asset_id', assetId);
   if (deleteError) throw new Error(deleteError.message);
   trackOperation('delete', 'supabase-asset-delete', 1);
+}
+
+export async function listBoardAssetIds(boardId: string): Promise<string[]> {
+  if (isSandboxEnvironment()) return [];
+  const ids:string[]=[];
+  for (let offset=0;;offset+=1000) {
+    const {data,error}=await supabase.from('board_assets').select('asset_id').eq('board_id',boardId).order('asset_id').range(offset,offset+999);
+    if(error)throw new Error(`Could not enumerate board media: ${error.message}`);
+    ids.push(...(data || []).map(row=>row.asset_id));
+    if(ids.length>2000)throw new Error('Board exceeds the 2000 asset archive limit.');
+    if((data || []).length<1000)return ids;
+  }
+}
+
+/** Only call for a newly allocated disposable draft; the source board is never passed here. */
+export async function deleteIncompleteTransferAssets(boardId: string): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(boardId)) throw new Error('Invalid transfer board ID.');
+  const prefix=`boards/${boardId}`;
+  const paths:string[]=[];
+  for (let offset=0;;offset+=1000) {
+    const {data,error}=await supabase.storage.from(BUCKET).list(prefix,{limit:1000,offset,sortBy:{column:'name',order:'asc'}});
+    if (error) throw new Error(`Could not enumerate incomplete media: ${error.message}`);
+    for (const object of data || []) {
+      if (!object.id || !/^[A-Za-z0-9_.-]+$/.test(object.name) || object.name==='.' || object.name==='..') throw new Error('Unexpected transfer Storage object.');
+      paths.push(`${prefix}/${object.name}`);
+    }
+    if ((data || []).length<1000) break;
+  }
+  for(let i=0;i<paths.length;i+=100) {
+    const {error}=await supabase.storage.from(BUCKET).remove(paths.slice(i,i+100));
+    if(error)throw new Error(`Could not remove incomplete media: ${error.message}`);
+  }
+  clearAssetCache(boardId);
 }
 
 export async function deleteAllBoardAssets(boardId: string): Promise<number> {

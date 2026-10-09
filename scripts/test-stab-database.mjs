@@ -150,6 +150,23 @@ try {
   check(restoredBoard.board.current_revision, 2);
   check(restoredBoard.shards.flatMap(shard => Object.keys(shard.elements)).sort(), ['existing', 'first', 'second']);
   check(restoredBoard.assets.length, 2);
+  // UX-1 covers persist through the existing shape infrastructure and viewer RLS.
+  const coverId='cover-ux1';
+  const coverShard=(await admin.query('select element_shard_id($1) as shard',[coverId])).rows[0].shard;
+  const coverMutation=revealed=>[{elementId:coverId,shardId:coverShard,action:'set',data:{id:coverId,type:'shape',shapeType:'rect',answerCover:true,revealed,x:10,y:20,width:200,height:100,zIndex:9,text:'',color:'#334155',borderColor:'#94a3b8'},updatedAt:Date.now(),updatedByClientId:owner}];
+  await writer.query("select apply_board_mutations('synthetic',$1)",[JSON.stringify(coverMutation(false))]);
+  await denied(reader.query("select apply_board_mutations('synthetic',$1)",[JSON.stringify(coverMutation(true))]));
+  await writer.query("select apply_board_mutations('synthetic',$1)",[JSON.stringify(coverMutation(true))]);
+  const viewerReload=(await reader.query("select get_board_state('synthetic') as payload")).rows[0].payload;
+  check(viewerReload.shards.flatMap(s=>Object.values(s.elements)).find(e=>e.id===coverId).revealed,true);
+  // New lesson copies default private, without inherited membership/share links.
+  await writer.query("select create_board('ux1-copy','Copied lesson','','Teacher','','',false,'initializing')");
+  check((await admin.query("select access_mode,status from boards where id='ux1-copy'")).rows[0],{access_mode:'private',status:'initializing'});
+  check((await admin.query("select count(*)::int as count from board_members where board_id='ux1-copy'")).rows[0].count,0);
+  check((await admin.query("select count(*)::int as count from board_share_links where board_id='ux1-copy'")).rows[0].count,0);
+  await denied(reader.query("select get_board_state('ux1-copy')"));
+  await writer.query("select finalize_board_initialization('ux1-copy')");
+  check((await admin.query("select status from boards where id='ux1-copy'")).rows[0].status,'ready');
   // Same board ids in another database must have the same generated fresh schema.
   const upgradeDefs = (await admin.query("select proname,pg_get_functiondef(oid) as body from pg_proc where pronamespace='public'::regnamespace order by proname,oid::regprocedure::text")).rows;
   await cluster.createDatabase('fresh_schema');

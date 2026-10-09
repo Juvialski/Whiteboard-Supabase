@@ -27,6 +27,7 @@ interface PdfPageNavigationProps {
   onRotatePage?: (pageId: string) => void;
   onDeletePage?: (pageId: string) => void;
   onMovePage?: (fromIndex: number, toIndex: number) => void;
+  bookmarks?: Record<string,string>;
   onBookmarkPage?: (pageId: string, label: string) => void;
   onAppendPdf?: (file: File) => void;
   onExportPdf?: () => void;
@@ -134,6 +135,7 @@ export default function PdfPageNavigation({
   onDeletePage,
   onMovePage,
   onBookmarkPage,
+  bookmarks = {},
   onAppendPdf,
   onExportPdf,
   onInsertBlankPage,
@@ -278,6 +280,7 @@ export default function PdfPageNavigation({
           )}
 
           <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-thin scrollbar-thumb-slate-200">
+            {pdfPages.some(p=>bookmarks[p.id]) && <div className="flex flex-wrap gap-1 text-xs" aria-label="PDF bookmarks">{pdfPages.map((p,i)=>bookmarks[p.id] ? <button key={p.id} onClick={()=>onJumpToPage(i)} className="bg-amber-50 text-amber-800 border border-amber-200 px-2 py-1 rounded-lg max-w-full truncate" title={`Page ${i+1}: ${bookmarks[p.id]}`}>{bookmarks[p.id]}</button>:null)}</div>}
             {pdfPages.map((page, idx) => {
               const isCurrent = idx === currentPageIndex;
               return (
@@ -329,8 +332,8 @@ export default function PdfPageNavigation({
                             e.stopPropagation();
                             onBookmarkPage(page.id, `Page ${idx + 1}`);
                           }}
-                          className="opacity-0 group-hover:opacity-100 p-1 hover:bg-amber-100 rounded text-slate-500 hover:text-amber-600 transition-all cursor-pointer"
-                          title="Bookmark Page"
+                          className="p-1 hover:bg-amber-100 rounded text-slate-500 hover:text-amber-600 transition-all cursor-pointer"
+                          title={bookmarks[page.id] ? `Remove bookmark: ${bookmarks[page.id]}` : "Bookmark Page"}
                         >
                           <Bookmark className="w-3 h-3" />
                         </button>

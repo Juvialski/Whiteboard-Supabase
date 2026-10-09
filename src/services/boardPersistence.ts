@@ -103,7 +103,7 @@ export function partitionMutationPayloads(
 export interface RemoteOperation {
   operationId: string;
   clientId: string;
-  baseRevision: number;
+  baseRevision?: number;
   elementId: string;
   action: 'set' | 'delete';
   data: BoardElement | Partial<BoardElement> | null;
@@ -127,6 +127,8 @@ interface BoardControl {
   subscribers: Set<(state: BoardState) => void>;
   shards: Map<string, Map<string, BoardElement>>;
   currentElements: Map<string, BoardElement>;
+  remotePreviews: Map<string, {data: BoardElement | null; baseline: string; receivedAt: number}>;
+  previewExpiryTimer: ReturnType<typeof setTimeout> | null;
   pendingMutations: Map<string, MutationItem>;
   appliedOperationIds: Set<string>;
   boardData: any;
@@ -237,12 +239,45 @@ function shardMapFromRow(row: any): Map<string, BoardElement> {
   return result;
 }
 
+function elementFingerprint(element: BoardElement | undefined): string {
+  // JSONB reorders object keys; use canonical key order when detecting a committed change.
+  const canonical = (value:any):any => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])) : value;
+  return JSON.stringify(canonical(element)) || '';
+}
+
+function schedulePreviewExpiry(control: BoardControl): void {
+  if (control.previewExpiryTimer) clearTimeout(control.previewExpiryTimer);
+  control.previewExpiryTimer=null;
+  if (!control.remotePreviews.size || control.disposed) return;
+  const nextExpiry=Math.min(...Array.from(control.remotePreviews.values(),p=>p.receivedAt+30000));
+  control.previewExpiryTimer=setTimeout(()=>{
+    control.previewExpiryTimer=null;rebuildCurrentElements(control);notify(control);schedulePreviewExpiry(control);
+  },Math.max(1,nextExpiry-Date.now()));
+}
+
 function rebuildCurrentElements(control: BoardControl): void {
   const next = new Map<string, BoardElement>();
   for (const shard of control.shards.values()) {
     for (const [id, element] of shard) next.set(id, element);
   }
 
+  for (const [id,preview] of control.remotePreviews) {
+    const authoritative = next.get(id);
+    if (Date.now()-preview.receivedAt >= 30000) {
+      control.remotePreviews.delete(id);continue;
+    }
+    const fingerprint=elementFingerprint(authoritative);
+    if (fingerprint !== preview.baseline) {
+      // A checkpoint may contain an earlier edit from the same author while
+      // a newer live edit is already on screen. Keep that newer preview.
+      const live=preview.data as any;
+      const committed=authoritative as any;
+      if (live?.updatedByClientId && live.updatedByClientId === committed?.updatedByClientId &&
+          Number(committed.updatedAt || 0) < Number(live.updatedAt || 0)) preview.baseline=fingerprint;
+      else {control.remotePreviews.delete(id);continue;}
+    }
+    if (preview.data) next.set(id,preview.data); else next.delete(id);
+  }
   if (control.boardData?.effectiveCanWrite === true) {
     for (const mutation of control.pendingMutations.values()) {
       if (mutation.action === 'delete') next.delete(mutation.elementId);
@@ -606,6 +641,8 @@ function createControl(boardId: string): BoardControl {
     subscribers: new Set(),
     shards: new Map(),
     currentElements: new Map(),
+    remotePreviews: new Map(),
+    previewExpiryTimer: null,
     pendingMutations: new Map(),
     appliedOperationIds: new Set(),
     boardData: null,
@@ -804,6 +841,12 @@ function disposeControlIfIdle(control: BoardControl): void {
     // of keeping a free Render connection alive after the board UI is closed.
     disposeBoardPersistence(control.boardId);
   }
+}
+
+/** Release read-only loads created by dashboard transfers without disrupting an open board or pending edits. */
+export function releaseIdleBoardState(boardId:string):void {
+  const control=activeControls.get(boardId);
+  if(control)disposeControlIfIdle(control);
 }
 
 function scheduleRetry(control: BoardControl): void {
@@ -1136,7 +1179,7 @@ export function queueElementMutation(
     data: clean,
     action,
     generation: control.dirtyGeneration,
-    updatedAt: Date.now(),
+    updatedAt: typeof (clean as any)?.updatedAt === 'number' ? (clean as any).updatedAt : Date.now(),
     updatedByClientId: updatedByClientId || auth.currentUser?.uid || 'local-client',
   };
   control.pendingMutations.set(elementId, mutation);
@@ -1180,7 +1223,7 @@ export function mergeRemoteElementData(
 
 export function applyRemoteOperation(boardId: string, operation: RemoteOperation): void {
   const control = getOrCreateControl(boardId);
-  if (operation.baseRevision < control.revision) return;
+  if (operation.baseRevision !== undefined && operation.baseRevision < control.revision) return;
   if (control.appliedOperationIds.has(operation.operationId)) return;
   control.appliedOperationIds.add(operation.operationId);
   if (control.appliedOperationIds.size > 2_000) {
@@ -1192,9 +1235,10 @@ export function applyRemoteOperation(boardId: string, operation: RemoteOperation
   if (control.pendingMutations.has(operation.elementId)) return;
 
   const shardId = getShardIdForElement(operation.elementId);
-  const shard = new Map(control.shards.get(shardId) || []);
+  const shard = control.shards.get(shardId);
+  const baseline = control.remotePreviews.get(operation.elementId)?.baseline ?? elementFingerprint(shard?.get(operation.elementId));
   if (operation.action === 'delete') {
-    shard.delete(operation.elementId);
+    control.remotePreviews.set(operation.elementId,{data:null,baseline,receivedAt:Date.now()});
     control.currentElements.delete(operation.elementId);
   } else if (operation.data) {
     try {
@@ -1205,15 +1249,15 @@ export function applyRemoteOperation(boardId: string, operation: RemoteOperation
         operation.elementId,
         operation.isMerge === true,
       );
-      shard.set(operation.elementId, next);
+      control.remotePreviews.set(operation.elementId,{data:next,baseline,receivedAt:Date.now()});
       control.currentElements.set(operation.elementId, next);
     } catch (error) {
       console.warn('Ignored an invalid realtime element update.', error);
       return;
     }
   }
-  if (shard.size > 0) control.shards.set(shardId, shard);
-  else control.shards.delete(shardId);
+  if (control.remotePreviews.size > 2000) control.remotePreviews.delete(control.remotePreviews.keys().next().value!);
+  schedulePreviewExpiry(control);
   if (control.boardData) control.boardData = { ...control.boardData, updatedAt: operation.updatedAt };
   notify(control);
 }
@@ -1465,6 +1509,8 @@ export function disposeBoardPersistence(boardId?: string): void {
     if (control.idleTimer) clearTimeout(control.idleTimer);
     if (control.maxTimer) clearTimeout(control.maxTimer);
     if (control.retryTimer) clearTimeout(control.retryTimer);
+    if (control.previewExpiryTimer) clearTimeout(control.previewExpiryTimer);
+    control.remotePreviews.clear();
     control.retryTimer = null;
     control.socketAuthenticated = false;
     control.socketMessageUnsubscribe?.();

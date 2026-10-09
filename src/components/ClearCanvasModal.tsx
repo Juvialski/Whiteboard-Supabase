@@ -6,6 +6,8 @@ interface ClearCanvasModalProps {
   onClose: () => void;
   onConfirm: () => void;
   elementCount: number;
+  activePageOnly?: boolean;
+  isPdfBoard?: boolean;
 }
 
 export default function ClearCanvasModal({
@@ -13,6 +15,8 @@ export default function ClearCanvasModal({
   onClose,
   onConfirm,
   elementCount,
+  activePageOnly=false,
+  isPdfBoard=false,
 }: ClearCanvasModalProps) {
   if (!isOpen) return null;
 
@@ -32,9 +36,9 @@ export default function ClearCanvasModal({
         </div>
 
         <div className="space-y-1.5">
-          <h3 className="text-lg font-extrabold text-slate-900">Clear entire canvas?</h3>
+          <h3 className="text-lg font-extrabold text-slate-900">{activePageOnly ? 'Clear active page annotations?' : isPdfBoard ? 'Clear annotations only?' : 'Clear canvas?'}</h3>
           <p className="text-sm text-slate-500">
-            This action will remove all <strong className="text-slate-700 font-bold">{elementCount}</strong> element(s) from this whiteboard workspace. You can still use <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded text-xs font-mono">Ctrl+Z</kbd> to undo.
+            This removes <strong className="text-slate-700 font-bold">{elementCount}</strong> element(s){activePageOnly ? ' on the active page' : ''}. PDF pages and private assets stay intact. Ctrl+Z cannot undo this collaborative action. A complete recovery archive downloads before clearing. Keep that file and use Restore board archive on the dashboard to recover into a separate private board.
           </p>
         </div>
 
