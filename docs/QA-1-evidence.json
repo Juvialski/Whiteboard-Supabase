@@ -1,0 +1,722 @@
+{
+  "date": "2026-10-09",
+  "timezone": "Asia/Manila",
+  "verdict": "INCOMPLETE",
+  "baseCommit": "65d7ca73125f71d6d939dfe8713747926a9460c9",
+  "scope": "Hosted counts exclude synthetic/local results; BLOCKED includes unexecuted scenarios.",
+  "counts": {
+    "PASS": 42,
+    "FAIL": 2,
+    "BLOCKED": 28
+  },
+  "groupCounts": {
+    "deployment": {
+      "PASS": 6,
+      "FAIL": 1,
+      "BLOCKED": 2
+    },
+    "timer": {
+      "PASS": 11,
+      "FAIL": 0,
+      "BLOCKED": 5
+    },
+    "collaboration": {
+      "PASS": 2,
+      "FAIL": 0,
+      "BLOCKED": 6
+    },
+    "cursors": {
+      "PASS": 0,
+      "FAIL": 0,
+      "BLOCKED": 2
+    },
+    "covers": {
+      "PASS": 4,
+      "FAIL": 0,
+      "BLOCKED": 1
+    },
+    "duplication": {
+      "PASS": 2,
+      "FAIL": 0,
+      "BLOCKED": 1
+    },
+    "backup": {
+      "PASS": 1,
+      "FAIL": 1,
+      "BLOCKED": 3
+    },
+    "clearing": {
+      "PASS": 3,
+      "FAIL": 0,
+      "BLOCKED": 2
+    },
+    "navigation": {
+      "PASS": 4,
+      "FAIL": 0,
+      "BLOCKED": 3
+    },
+    "responsive": {
+      "PASS": 4,
+      "FAIL": 0,
+      "BLOCKED": 1
+    },
+    "offline": {
+      "PASS": 2,
+      "FAIL": 0,
+      "BLOCKED": 1
+    },
+    "performance": {
+      "PASS": 3,
+      "FAIL": 0,
+      "BLOCKED": 1
+    }
+  },
+  "groups": {
+    "deployment": [
+      [
+        "Public HTTP response",
+        "PASS"
+      ],
+      [
+        "Startup assets and requests",
+        "PASS"
+      ],
+      [
+        "Startup/reload JavaScript errors",
+        "PASS"
+      ],
+      [
+        "Latest UX-1 main JavaScript equivalence",
+        "PASS"
+      ],
+      [
+        "Health endpoint",
+        "PASS"
+      ],
+      [
+        "Render status and exact server SHA",
+        "BLOCKED"
+      ],
+      [
+        "RPCs exercised by hosted timers/create/load/copy/checkpoints",
+        "PASS"
+      ],
+      [
+        "Complete RPC catalog",
+        "BLOCKED"
+      ],
+      [
+        "Saved title after direct-link reload",
+        "FAIL"
+      ]
+    ],
+    "timer": [
+      [
+        "Custom 30-second duration",
+        "PASS"
+      ],
+      [
+        "Running countdown reload",
+        "PASS"
+      ],
+      [
+        "Paused countdown reload",
+        "PASS"
+      ],
+      [
+        "Resume and completion",
+        "PASS"
+      ],
+      [
+        "Close/reopen timer",
+        "PASS"
+      ],
+      [
+        "One-minute preset",
+        "PASS"
+      ],
+      [
+        "Other preset buttons",
+        "BLOCKED"
+      ],
+      [
+        "Timer/stopwatch mode switch",
+        "PASS"
+      ],
+      [
+        "Running stopwatch reload",
+        "PASS"
+      ],
+      [
+        "Controlled background/foreground timing",
+        "BLOCKED"
+      ],
+      [
+        "Completion visual alert with closed panel",
+        "PASS"
+      ],
+      [
+        "Sound preference reload",
+        "PASS"
+      ],
+      [
+        "Test Sound UI action",
+        "PASS"
+      ],
+      [
+        "Actual audible sound",
+        "BLOCKED"
+      ],
+      [
+        "Two isolated timer contexts",
+        "BLOCKED"
+      ],
+      [
+        "Hosted viewer timer rejection",
+        "BLOCKED"
+      ]
+    ],
+    "collaboration": [
+      [
+        "Pencil stroke persistence",
+        "PASS"
+      ],
+      [
+        "Immediate remote completed strokes before checkpoint",
+        "BLOCKED"
+      ],
+      [
+        "Text creation/edit/reload",
+        "PASS"
+      ],
+      [
+        "General element move/resize across clients",
+        "BLOCKED"
+      ],
+      [
+        "Single-element deletion across clients",
+        "BLOCKED"
+      ],
+      [
+        "Undo/redo synchronization (controls exercised only)",
+        "BLOCKED"
+      ],
+      [
+        "Teacher/guest cursor synchronization",
+        "BLOCKED"
+      ],
+      [
+        "Missed remote edits on reconnect",
+        "BLOCKED"
+      ]
+    ],
+    "cursors": [
+      [
+        "Markers over text/equations/drawings/images/PDF/dense content",
+        "BLOCKED"
+      ],
+      [
+        "Pan/zoom accuracy, noninterception, multiple labels and follow",
+        "BLOCKED"
+      ]
+    ],
+    "covers": [
+      [
+        "Create and hide/reveal",
+        "PASS"
+      ],
+      [
+        "Reload hidden state",
+        "PASS"
+      ],
+      [
+        "Same-account second-tab reveal update",
+        "PASS"
+      ],
+      [
+        "Move/resize and zoom; persisted 301x146 geometry",
+        "PASS"
+      ],
+      [
+        "Hosted viewer rejection and export masking",
+        "BLOCKED"
+      ]
+    ],
+    "duplication": [
+      [
+        "Text/drawing/cover: content, geometry, layers and new IDs",
+        "PASS"
+      ],
+      [
+        "Source unchanged; separate copy with student writing locked",
+        "PASS"
+      ],
+      [
+        "Image/PDF/math media copy and new asset IDs",
+        "BLOCKED"
+      ]
+    ],
+    "backup": [
+      [
+        "Actual downloaded v2 JSON with all three source elements",
+        "PASS"
+      ],
+      [
+        "Saved board title in downloaded metadata",
+        "FAIL"
+      ],
+      [
+        "Hosted complete archive restore to separate board",
+        "BLOCKED"
+      ],
+      [
+        "Hosted malformed-file rejection",
+        "BLOCKED"
+      ],
+      [
+        "Hosted legacy archive compatibility",
+        "BLOCKED"
+      ]
+    ],
+    "clearing": [
+      [
+        "Truthful warning and recovery file before confirmation",
+        "PASS"
+      ],
+      [
+        "Clear disposable duplicate",
+        "PASS"
+      ],
+      [
+        "Source remains intact after clearing copy",
+        "PASS"
+      ],
+      [
+        "Hosted PDF active-page/background/unrelated-page preservation",
+        "BLOCKED"
+      ],
+      [
+        "Hosted recovery archive restore",
+        "BLOCKED"
+      ]
+    ],
+    "navigation": [
+      [
+        "Pin/unpin disposable board",
+        "PASS"
+      ],
+      [
+        "Dashboard search and recents",
+        "PASS"
+      ],
+      [
+        "Saved zoom after reload",
+        "PASS"
+      ],
+      [
+        "Explicit pan-coordinate persistence",
+        "BLOCKED"
+      ],
+      [
+        "Reset View restores 100% zoom",
+        "PASS"
+      ],
+      [
+        "Hosted PDF bookmarks/reorder/delete behavior",
+        "BLOCKED"
+      ],
+      [
+        "Multiple-account preference isolation",
+        "BLOCKED"
+      ]
+    ],
+    "responsive": [
+      [
+        "Public phone/tablet dashboard, no horizontal overflow",
+        "PASS"
+      ],
+      [
+        "Authenticated phone toolbar layout",
+        "PASS"
+      ],
+      [
+        "Phone timer controls fit viewport",
+        "PASS"
+      ],
+      [
+        "Tablet clear confirmation visible",
+        "PASS"
+      ],
+      [
+        "Touch drawing, reveal, PDF navigation and dense text",
+        "BLOCKED"
+      ]
+    ],
+    "offline": [
+      [
+        "QA-tab-only interruption and accurate local/pending/sync status",
+        "PASS"
+      ],
+      [
+        "Text recovery through reconnection/reload, no duplicated element",
+        "PASS"
+      ],
+      [
+        "Concurrent stale-revision conflict/recovery in hosted clients",
+        "BLOCKED"
+      ]
+    ],
+    "performance": [
+      [
+        "Public navigation/request timings recorded",
+        "PASS"
+      ],
+      [
+        "Public startup console and network clean",
+        "PASS"
+      ],
+      [
+        "Lightweight canvas interactions exercised",
+        "PASS"
+      ],
+      [
+        "Quantified drawing latency/cursor smoothness/listener or memory leaks",
+        "BLOCKED"
+      ]
+    ]
+  },
+  "deployment": {
+    "http": [
+      {
+        "path": "/",
+        "status": 200,
+        "ms": 205
+      },
+      {
+        "path": "/assets/index-DgL2W1SU.js",
+        "status": 200,
+        "bytes": 1748998,
+        "sha256": "d86cec1da41d98a7179608679d5d0bbce9f844f86fc04450dab2e2581bc1d3a6",
+        "contentType": "application/javascript; charset=UTF-8"
+      },
+      {
+        "path": "/assets/index-CpYZOiDG.css",
+        "status": 200,
+        "bytes": 129087,
+        "sha256": "65eb0610a3f9c6450216873409e8857502be1d4d3b7ed9618a618bdbe3b9c034",
+        "contentType": "text/css; charset=UTF-8"
+      },
+      {
+        "path": "/healthz",
+        "status": 200,
+        "body": "{\"status\":\"ok\"}"
+      },
+      {
+        "path": "/api/qa1-nonexistent",
+        "status": 404,
+        "body": "{\"success\":false,\"error\":\"API route not found\"}"
+      }
+    ],
+    "featureMarkers": {
+      "transition_board_timer": true,
+      "Cover Answer": true,
+      "Restore board archive": true,
+      "Clear Active Page Annotations": true
+    },
+    "mainJavaScript": {
+      "equal": true,
+      "sha256": "cec029f05f903dbdea7917895389d835741fb0c7a7c58505d4c4167b19985e9c",
+      "normalization": "generated relative JS asset hashes",
+      "baseCommit": "65d7ca73125f71d6d939dfe8713747926a9460c9"
+    },
+    "exactServerCommit": null
+  },
+  "publicBrowser": {
+    "version": "145.0.7632.6",
+    "headless": true,
+    "freshContexts": true,
+    "audio": "muted; no audible verification",
+    "views": [
+      {
+        "name": "desktop",
+        "width": 1440,
+        "height": 900,
+        "loadMs": 1359,
+        "overflow": false,
+        "errors": [],
+        "failures": [],
+        "requests": [
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 304
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 304
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 304
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 304
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 304
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 304
+          }
+        ]
+      },
+      {
+        "name": "mobile",
+        "width": 390,
+        "height": 844,
+        "loadMs": 1051,
+        "overflow": false,
+        "errors": [],
+        "failures": [],
+        "requests": [
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 200
+          }
+        ]
+      },
+      {
+        "name": "tablet",
+        "width": 768,
+        "height": 1024,
+        "loadMs": 1078,
+        "overflow": false,
+        "errors": [],
+        "failures": [],
+        "requests": [
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-CpYZOiDG.css",
+            "status": 200
+          },
+          {
+            "origin": "https://fonts.googleapis.com",
+            "path": "/css2",
+            "status": 200
+          },
+          {
+            "origin": "https://whiteboard-8y56.onrender.com",
+            "path": "/assets/index-DgL2W1SU.js",
+            "status": 200
+          }
+        ]
+      }
+    ]
+  },
+  "supplementalLocal": {
+    "scope": "synthetic localhost sandbox only",
+    "checks": [
+      {
+        "name": "local complete archive restore",
+        "status": "PASS",
+        "evidence": "Created separate sandbox board from version 2 archive"
+      },
+      {
+        "name": "local mixed-content duplicate and unique dashboard card",
+        "status": "PASS",
+        "evidence": "Eight elements copied to new IDs; one visible copy; source intact; student editing disabled"
+      },
+      {
+        "name": "local mixed-content restore",
+        "status": "PASS",
+        "evidence": {
+          "types": [
+            "text",
+            "drawing",
+            "math",
+            "shape",
+            "image",
+            "image",
+            "image",
+            "text"
+          ],
+          "count": 8,
+          "pdfBackgrounds": 2
+        }
+      },
+      {
+        "name": "local image decoding",
+        "status": "PASS",
+        "evidence": "Three inline PNG images decoded by Chromium"
+      },
+      {
+        "name": "local complete archive download",
+        "status": "PASS",
+        "evidence": {
+          "bytes": 2048,
+          "name": "Restored QA-1 Media and PDF Fixture 2026-10-09",
+          "elements": 8
+        }
+      },
+      {
+        "name": "local PDF bookmark",
+        "status": "PASS",
+        "evidence": "Named bookmark appears in page drawer"
+      },
+      {
+        "name": "local PDF reorder bookmark",
+        "status": "PASS",
+        "evidence": "Stable bookmark remains after page move"
+      },
+      {
+        "name": "local active PDF page clear",
+        "status": "PASS",
+        "evidence": {
+          "before": 8,
+          "after": 3,
+          "pdfBackgrounds": 2,
+          "otherPageRetained": true
+        }
+      },
+      {
+        "name": "local separate-board recovery",
+        "status": "PASS",
+        "evidence": "Archive restores to a new ID; source remains cleared"
+      },
+      {
+        "name": "local malformed archive rejection",
+        "status": "PASS",
+        "evidence": "Unsupported version rejected without allocating a board"
+      }
+    ]
+  },
+  "hostedDuplication": {
+    "sourceElements": 3,
+    "copyElements": 3,
+    "newIds": true,
+    "typesPreserved": true,
+    "contentPreserved": true
+  },
+  "validation": {
+    "runtime": "Node 22.23.3",
+    "fullSuite": {
+      "files": 37,
+      "tests": 197
+    },
+    "isolatedPostgresAssertions": 54,
+    "exitCodes": {
+      "typecheck": 0,
+      "migrations": 0,
+      "tests": 0,
+      "build": 0
+    }
+  },
+  "fixes": [
+    {
+      "severity": "P2",
+      "scope": "hosted",
+      "issue": "Saved lesson title replaced by placeholder after direct reload; backup metadata uses placeholder",
+      "fix": "Use authorized current-board manifest name and synchronize parent name"
+    },
+    {
+      "severity": "P3",
+      "scope": "local sandbox",
+      "issue": "Restore callback and storage event insert duplicate dashboard cards for one board",
+      "fix": "Deduplicate completed restore/copy by board ID"
+    }
+  ],
+  "cleanup": {
+    "sourceBoard": "7027e8a5-b759-45c3-967c-8de8abd954fe",
+    "copyBoard": "609e5718-251a-4b93-9831-28b110061ab2",
+    "approved": true,
+    "deleted": true,
+    "verified": "Filtered dashboard empty after cloud refresh and reload; recent shortcuts gone"
+  },
+  "limitations": [
+    "Chrome extension file-URL access unavailable; file uploads blocked",
+    "Isolated guest invitation navigation rejected for invalid URL; no workaround attempted",
+    "No Render or Supabase management connection",
+    "Same-account tabs are not separate teacher/guest identities",
+    "Audio API/UI exercise does not establish audible output",
+    "Synthetic PDF tests use raster page fixtures, not hosted original PDF import"
+  ]
+}

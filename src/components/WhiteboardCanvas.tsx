@@ -425,14 +425,16 @@ interface WhiteboardCanvasProps {
   boardName: string;
   currentUser: UserProfile;
   onBackToDashboard: () => void;
+  onBoardNameChanged?: (name: string) => void;
   adminClaim?: boolean;
 }
 
 export default function WhiteboardCanvas({
   boardId,
-  boardName,
+  boardName: initialBoardName,
   currentUser,
   onBackToDashboard,
+  onBoardNameChanged,
   adminClaim = false,
 }: WhiteboardCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -469,6 +471,13 @@ export default function WhiteboardCanvas({
   
   const [clipboardElements, setClipboardElements] = useState<BoardElement[]>([]);
   const [boardData, setBoardData] = useState<Whiteboard | null>(null);
+  // Direct links start with a placeholder; the authorized manifest owns the
+  // displayed/exported name, including names changed by another collaborator.
+  const boardName = boardData?.id === boardId && boardData.name
+    ? boardData.name : initialBoardName;
+  useEffect(() => {
+    if (boardData?.id === boardId && boardData.name) onBoardNameChanged?.(boardData.name);
+  }, [boardId, boardData?.id, boardData?.name, onBoardNameChanged]);
   const [isHydrated, setIsHydrated] = useState(false);
   const [hydrationError, setHydrationError] = useState<string | null>(null);
   const isHydratedRef = useRef(false);
