@@ -732,6 +732,7 @@ export default function App() {
         <WhiteboardCanvas
           boardId={boardId}
           boardName={boardName}
+          onBoardNameChanged={setBoardName}
           currentUser={profile}
           onBackToDashboard={handleBackToDashboard}
           adminClaim={adminClaim}

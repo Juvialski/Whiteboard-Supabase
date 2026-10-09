@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "exportedAt": 1,
+  "board": {
+    "name": "QA-1 Media and PDF Fixture 2026-10-09",
+    "description": "Synthetic QA fixture only; raster PDF page backgrounds."
+  },
+  "elements": [
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-question",
+      "type": "text",
+      "x": 40,
+      "y": 60,
+      "width": 260,
+      "height": 100,
+      "text": "QA fixture question: 2 + 2 = 4",
+      "fontSize": 18
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-drawing",
+      "type": "drawing",
+      "width": 4,
+      "points": [
+        {
+          "x": 60,
+          "y": 140
+        },
+        {
+          "x": 140,
+          "y": 180
+        }
+      ]
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-math",
+      "type": "math",
+      "x": 40,
+      "y": 220,
+      "width": 260,
+      "height": 60,
+      "fontSize": 24,
+      "text": "x^2 + y^2 = z^2"
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-shape",
+      "type": "shape",
+      "x": 350,
+      "y": 220,
+      "width": 100,
+      "height": 80,
+      "shapeType": "rect"
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-image",
+      "type": "image",
+      "x": 350,
+      "y": 50,
+      "width": 60,
+      "height": 60,
+      "assetId": "qa-png"
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 0,
+      "color": "#000000",
+      "id": "pdf-page-qa1",
+      "type": "image",
+      "x": 0,
+      "y": 0,
+      "width": 500,
+      "height": 700,
+      "assetId": "qa-png"
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 0,
+      "color": "#000000",
+      "id": "pdf-page-qa2",
+      "type": "image",
+      "x": 0,
+      "y": 750,
+      "width": 500,
+      "height": 700,
+      "assetId": "qa-png"
+    },
+    {
+      "updatedAt": 1,
+      "zIndex": 2,
+      "color": "#000000",
+      "id": "qa-second-page",
+      "type": "text",
+      "x": 40,
+      "y": 850,
+      "width": 200,
+      "height": 100,
+      "text": "QA unrelated page stays intact",
+      "fontSize": 18
+    }
+  ],
+  "assets": [
+    {
+      "id": "qa-png",
+      "mimeType": "image/png",
+      "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5XQAAAAASUVORK5CYII=",
+      "byteSize": 68
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+// Supplemental synthetic browser checks against localhost only. These do not
+// establish hosted Storage/RLS or teacher/guest acceptance.
+const fs=require('node:fs'); const path=require('node:path'); const assert=require('node:assert/strict');
+const {chromium}=require(process.env.QA_PLAYWRIGHT_MODULE);
+const out=path.resolve('artifacts/qa-1'); const origin='http://127.0.0.1:3199';
+const checks=[]; const record=(name,evidence)=>checks.push({name,status:'PASS',evidence});
+(async()=>{
+ const browser=await chromium.launch({headless:true,args:['--mute-audio']});
+ try {
+  const context=await browser.newContext({viewport:{width:1440,height:900},acceptDownloads:true});
+  await context.route('**/*',route=>{const u=new URL(route.request().url()); return ['127.0.0.1','localhost'].includes(u.hostname)&&u.port==='3199' ? route.continue() : route.abort();});
+  await context.addInitScript(()=>{if(!localStorage.getItem('QA1_INITIALIZED')){
+   localStorage.setItem('QA1_INITIALIZED','1');localStorage.setItem('WHITEBOARD_LOCAL_SANDBOX','true');
+   localStorage.setItem('lucid_spark_user_name','QA Local Teacher');localStorage.setItem('lucid_spark_user_id','qa-local-owner');
+   localStorage.setItem('lucid_spark_user_role','teacher');localStorage.setItem('lucid_spark_boards','[]');
+  }});
+  const page=await context.newPage(); let promptLabel='QA page bookmark';
+  page.on('dialog',d=>d.type()==='prompt'?d.accept(promptLabel):d.accept());
+  await page.goto(origin,{waitUntil:'networkidle'});
+  await page.locator('input[accept=".json"]').setInputFiles(path.resolve('scripts/qa-1-fixtures/media.whiteboard.json'));
+  const title='Restored QA-1 Media and PDF Fixture 2026-10-09';
+  await page.getByRole('heading',{name:title,exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:title,exact:true}).count(),1);
+  record('local complete archive restore','Created separate sandbox board from version 2 archive');
+  await page.getByTitle('Duplicate Board',{exact:true}).click();
+  const copyTitle=`Copy of ${title}`;
+  await page.getByRole('heading',{name:copyTitle,exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:copyTitle,exact:true}).count(),1);
+  const copied=await page.evaluate(()=>{
+    const bs=JSON.parse(localStorage.getItem('lucid_spark_boards'));
+    return bs.map(b=>({board:b,elements:JSON.parse(localStorage.getItem(`lucid_spark_board_elements_${b.id}`))}));
+  });
+  assert.equal(copied.length,2);assert.equal(copied[0].elements.length,8);
+  assert(copied[0].elements.every(e=>!copied[1].elements.some(s=>s.id===e.id)));
+  assert.equal(copied[0].board.studentsCanWrite,false);
+  record('local mixed-content duplicate and unique dashboard card','Eight elements copied to new IDs; one visible copy; source intact; student editing disabled');
+  await page.getByRole('heading',{name:title,exact:true}).click();
+  await page.getByText('QA fixture question: 2 + 2 = 4',{exact:true}).waitFor();
+  const boardId=new URL(page.url()).searchParams.get('board');
+  let elements=await page.evaluate(id=>JSON.parse(localStorage.getItem(`lucid_spark_board_elements_${id}`)),boardId);
+  assert.equal(elements.length,8); assert.equal(elements.filter(e=>e.id.startsWith('pdf-page-')).length,2);
+  record('local mixed-content restore',{types:elements.map(e=>e.type),count:8,pdfBackgrounds:2});
+  assert.equal(await page.locator('.katex annotation').first().textContent(),'x^2 + y^2 = z^2');
+  await page.waitForFunction(()=>[...document.querySelectorAll('img[src^="data:image"]')].filter(i=>i.complete&&i.naturalWidth>0).length>=3);
+  record('local image decoding','Three inline PNG images decoded by Chromium');
+  await page.screenshot({path:path.join(out,'local-media-board.png'),fullPage:true});
+  await page.getByTitle('More board options').click();
+  const downloaded=page.waitForEvent('download'); await page.getByText('Complete Backup (.json)',{exact:true}).click();
+  const download=await downloaded; const archivePath=path.join(out,'local-roundtrip.whiteboard.json');await download.saveAs(archivePath);
+  const archive=JSON.parse(fs.readFileSync(archivePath,'utf8'));assert.equal(archive.board.name,title);assert.equal(archive.elements.length,8);
+  record('local complete archive download',{bytes:fs.statSync(archivePath).size,name:archive.board.name,elements:8});
+  await page.getByTitle('Toggle PDF Page Drawer').click();
+  await page.getByTitle('Bookmark Page',{exact:true}).first().click();
+  await page.getByRole('button',{name:'QA page bookmark',exact:true}).waitFor();
+  record('local PDF bookmark','Named bookmark appears in page drawer');
+  await page.getByTitle('Move Page Down',{exact:true}).first().click();
+  assert(await page.getByRole('button',{name:'QA page bookmark',exact:true}).isVisible());
+  record('local PDF reorder bookmark','Stable bookmark remains after page move');
+  await page.getByTitle('Close drawer').click();
+  await page.getByTitle('More board options').click();
+  await page.getByText('Clear Active Page Annotations...',{exact:true}).click();
+  const recovery=page.waitForEvent('download');await page.getByRole('button',{name:'Clear Canvas',exact:true}).click();
+  const recoveryFile=await recovery; await recoveryFile.saveAs(path.join(out,'local-clear-recovery.whiteboard.json'));
+  await page.waitForTimeout(500);
+  const after=await page.evaluate(id=>JSON.parse(localStorage.getItem(`lucid_spark_board_elements_${id}`)),boardId);
+  assert.equal(after.filter(e=>e.id.startsWith('pdf-page-')).length,2);assert(after.length<8);assert(after.some(e=>e.type==='text'));
+  record('local active PDF page clear',{before:8,after:after.length,pdfBackgrounds:2,otherPageRetained:true});
+  await page.getByRole('button',{name:'All Boards',exact:true}).click();
+  await page.locator('input[accept=".json"]').setInputFiles(archivePath);
+  await page.getByRole('heading',{name:`Restored ${title}`,exact:true}).waitFor();
+  assert.equal(await page.getByRole('heading',{name:`Restored ${title}`,exact:true}).count(),1);
+  const boards=await page.evaluate(()=>JSON.parse(localStorage.getItem('lucid_spark_boards')));
+  assert.equal(boards.length,3);assert.notEqual(boards[0].id,boardId);
+  record('local separate-board recovery','Archive restores to a new ID; source remains cleared');
+  let alert='';page.once('dialog',d=>{alert=d.message();});
+  await page.locator('input[accept=".json"]').setInputFiles(path.resolve('scripts/qa-1-fixtures/malformed.whiteboard.json'));
+  await page.waitForTimeout(300);assert.match(alert,/Unsupported archive version/);
+  assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('lucid_spark_boards')).length),3);
+  record('local malformed archive rejection','Unsupported version rejected without allocating a board');
+  await context.close();
+ } finally {await browser.close();fs.writeFileSync(path.join(out,'local-results.json'),JSON.stringify({scope:'synthetic localhost sandbox only',checks},null,2));}
+ console.log(JSON.stringify(checks,null,2));
+})().catch(e=>{fs.writeFileSync(path.join(out,'local-results.json'),JSON.stringify({scope:'synthetic localhost sandbox only',checks,fatal:e.message},null,2));console.error(e);process.exitCode=1;});

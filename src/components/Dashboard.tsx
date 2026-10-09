@@ -952,7 +952,7 @@ export default function Dashboard({
 
     try {
       const copy = await duplicateCompleteBoard(board,currentUserProfile?.name || userName || 'Teacher',setTransferProgress);
-      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[copy,...prev]);
+      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[copy,...prev.filter(b=>b.id!==copy.id)]);
     } catch (error) {alert(error instanceof Error ? error.message : 'Duplication failed.');}
     finally {setIsDuplicatingId(null);setTransferProgress('');}
   };
@@ -973,7 +973,7 @@ export default function Dashboard({
       if (file.size > MAX_ARCHIVE_BYTES) throw new Error('Archive exceeds 256 MB.');
       const archive = parseBoardBackup(await file.text());
       const restored = await restoreBoardArchive(archive,`Restored ${archive.board.name}`,currentUserProfile?.name || userName || 'Teacher',setTransferProgress);
-      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[restored,...prev]);
+      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[restored,...prev.filter(b=>b.id!==restored.id)]);
     } catch(error) {alert(error instanceof Error ? error.message : 'Restore failed.');}
     finally {setIsRestoring(false);setTransferProgress('');}
   };
