@@ -18,6 +18,28 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 describe('timer widget reliability', () => {
+  it('updates countdown and stopwatch on foreground with no intervening tick callbacks', () => {
+    const action = vi.fn(async () => {});
+    const props = { isOpen: true, onClose: vi.fn(), onAction: action, serverNow: () => Date.now() };
+    const state = { ...initial, baseline_ms: 300000, total_seconds: 300, run_id: 100 };
+    const view = render(<WorkspaceTimer {...props} state={state} />);
+    expect(screen.getByText('05:00')).toBeTruthy();
+    vi.setSystemTime(121000);
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(screen.getByText('03:00')).toBeTruthy();
+    view.rerender(<WorkspaceTimer {...props} state={{ ...state, mode: 'stopwatch', baseline_ms: 0 }} />);
+    expect(screen.getByText('02:00')).toBeTruthy();
+    vi.setSystemTime(181000);
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(screen.getByText('03:00')).toBeTruthy();
+    expect(action).not.toHaveBeenCalled();
+  });
+  it.each([['1m', 60], ['3m', 180], ['5m', 300], ['10m', 600]])('sends the %s preset once through the transition API', (label, seconds) => {
+    const action = vi.fn(async () => {});
+    render(<WorkspaceTimer isOpen onClose={vi.fn()} state={{ ...initial, running: false }} onAction={action} serverNow={() => Date.now()} />);
+    fireEvent.click(screen.getByRole('button', { name: label }));
+    expect(action).toHaveBeenCalledExactlyOnceWith('duration', seconds);
+  });
   it('shows completion after browser sleep without writing on ticks or replaying alarms', async () => {
     const onAction = vi.fn(async () => {});
     const props = { isOpen: true, onClose: vi.fn(), state: { ...initial, run_id: 91 }, onAction, serverNow: () => Date.now() };

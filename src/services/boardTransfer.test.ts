@@ -41,6 +41,9 @@ import {
   prepareClearRecovery,
 } from "./boardTransfer";
 import { parseBoardBackup } from "../utils/boardBackup";
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { annotationIds } from '../utils/classroomPreferences';
 const png =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl4sAAAAASUVORK5CYII=";
 const board: Whiteboard = {
@@ -119,6 +122,48 @@ beforeEach(() => {
   }));
 });
 describe("complete board transfer", () => {
+  it('duplicates fixture PNG/PDF bytes and restores a pre-clear archive through a local in-memory asset backend', async () => {
+    const fixture = parseBoardBackup(readFileSync(resolve('scripts/qa-1-fixtures/media.whiteboard.json'), 'utf8'));
+    const image = `data:image/png;base64,${readFileSync(resolve('scripts/qa-2-fixtures/pixel.png')).toString('base64')}`;
+    const pdf = `data:application/pdf;base64,${readFileSync(resolve('scripts/qa-2-fixtures/one-page.pdf')).toString('base64')}`;
+    const assets = new Map([['source:qa-png', { data: image, mimeType: 'image/png' }], ['source:original-pdf', { data: pdf, mimeType: 'application/pdf' }]]);
+    const boards = new Map<string, BoardElement[]>([['source', structuredClone(fixture.elements)]]);
+    let count = 0;
+    mocks.load.mockImplementation(async id => ({ loadState: 'ready', elements: boards.get(id) }));
+    mocks.list.mockImplementation(async id => [...assets.keys()].filter(key => key.startsWith(id + ':')).map(key => key.slice(id.length + 1)));
+    mocks.read.mockImplementation(async (id, asset) => assets.get(`${id}:${asset}`));
+    mocks.create.mockImplementation(async () => ({ id: `destination-${++count}` }));
+    mocks.save.mockImplementation(async (id, _asset, data, mimeType) => {
+      const assetId = `asset-${assets.size}`;
+      assets.set(`${id}:${assetId}`, { data, mimeType }); return { assetId };
+    });
+    mocks.initialize.mockImplementation(async (id, content) => boards.set(id, structuredClone(content)));
+    const before = structuredClone(boards.get('source'));
+    const copy = await duplicateCompleteBoard(board, 'Teacher');
+    const copied = boards.get(copy.id)!;
+    expect(copy).toMatchObject({ accessMode: 'private', studentsCanWrite: false });
+    expect(boards.get('source')).toEqual(before);
+    expect(copied).toHaveLength(8);
+    expect(copied.every(e => !before!.some(original => original.id === e.id))).toBe(true);
+    expect(copied.filter(e => e.id.startsWith('pdf-page-'))).toHaveLength(2);
+    expect([...assets].filter(([key]) => key.startsWith(copy.id + ':')).map(([, value]) => value.data).sort()).toEqual([image, pdf].sort());
+    const archive = await prepareClearRecovery(board, before!, 'source', () => boards.get('source')!, () => true);
+    const pages = before!.filter(e => e.id.startsWith('pdf-page-'));
+    const remove = annotationIds(before!, pages, pages[0].id);
+    boards.set('source', before!.filter(e => !remove.has(e.id)));
+    expect(boards.get('source')!.map(e => e.id)).toEqual(['pdf-page-qa1', 'pdf-page-qa2', 'qa-second-page']);
+    const recovered = await restoreBoardArchive(parseBoardBackup(JSON.stringify(archive)), 'Recovered fixture', 'Teacher');
+    expect(recovered.id).not.toBe(copy.id);
+    expect(boards.get(recovered.id)).toHaveLength(8);
+    expect(boards.get('source')).toHaveLength(3);
+    expect([...assets].filter(([key]) => key.startsWith(recovered.id + ':')).map(([, value]) => value.data).sort()).toEqual([image, pdf].sort());
+  });
+  it('rejects the committed malformed archive before allocating a destination', async () => {
+    const malformed = JSON.parse(readFileSync(resolve('scripts/qa-1-fixtures/malformed.whiteboard.json'), 'utf8'));
+    await expect(restoreBoardArchive(malformed, 'Invalid', 'Teacher')).rejects.toThrow(/Unsupported archive version/);
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
   it("copies actual referenced private media and remaps pages, signatures, audio and connectors into a private board", async () => {
     const copy = await duplicateCompleteBoard(board, "Teacher");
     expect(copy.accessMode).toBe("private");

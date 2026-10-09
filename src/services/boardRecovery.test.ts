@@ -57,6 +57,21 @@ beforeEach(() => {
 });
 afterEach(() => { disposeBoardPersistence(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('durable mutation and board recovery', () => {
+  it('accepts the authoritative conflict winner after reconnect and removes only the acknowledged offline queue', async () => {
+    await ready();
+    queueElementMutation('one', 'local', note('local', 'offline loser'));
+    await vi.waitFor(() => expect(mock.store.get(getScopedBoardCacheKey('pending', 'one')!)?.length).toBe(1));
+    applyRemoteOperation('one', { operationId: 'newer-peer', clientId: 'peer', elementId: 'local', action: 'set', data: note('local', 'peer winner'), updatedAt: Date.now() + 100 });
+    expect(states.at(-1).elements.find((el: any) => el.id === 'local').text).toBe('offline loser');
+    const winner = note('local', 'peer winner');
+    mock.rpc.mockImplementation(async name => name === 'apply_board_mutations'
+      ? { data: { revision: 2, shards: { [getShardIdForElement('local')]: { local: winner } }, changedShardIds: [getShardIdForElement('local')], totalElements: 1 } }
+      : { data: cloudState('one') });
+    await flushBoardCheckpoint('one');
+    expect(states.at(-1).elements.find((el: any) => el.id === 'local').text).toBe('peer winner');
+    expect(getPendingCheckpointBoardIds()).toEqual([]);
+    expect(mock.store.has(getScopedBoardCacheKey('pending', 'one')!)).toBe(false);
+  });
   it('reports pending before durable local save, and surfaces IndexedDB failure without discarding memory', async () => {
     await ready();
     const statuses: string[] = [];

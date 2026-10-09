@@ -1,5 +1,6 @@
 {
   "date": "2026-10-09",
+  "followUp": { "phase": "QA-2", "evidence": "docs/QA-2-evidence.json", "hostedCountsRemainHistorical": true },
   "timezone": "Asia/Manila",
   "verdict": "INCOMPLETE",
   "baseCommit": "65d7ca73125f71d6d939dfe8713747926a9460c9",

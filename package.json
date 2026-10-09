@@ -11,10 +11,11 @@
     "schema:generate": "node scripts/generate-schema.mjs",
     "check:migrations": "node scripts/verify-migrations.mjs",
     "test:database": "node scripts/test-stab-database.mjs",
+    "test:integration": "node scripts/test-stab-database.mjs --qa2",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run check:migrations && npm run typecheck && npm test && npm run build"
+    "verify": "npm run check:migrations && npm run typecheck && npm test && npm run test:integration && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.15.0",

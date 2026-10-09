@@ -554,8 +554,13 @@ function sanitizeRelayMessage(message: any, context: SocketContext): Record<stri
       if (typeof message.elementId !== "string" || message.elementId.length < 1 || message.elementId.length > 128) return null;
       if (!new Set(["set", "delete"]).has(message.actionType)) return null;
       if (message.actionType !== "delete" && (!message.elementData || typeof message.elementData !== "object" || Array.isArray(message.elementData))) return null;
-      if (payloadSize(message.elementData) > 64 * 1024 || containsForbiddenObjectKey(message.elementData)) return null;
-      if (message.actionType !== "delete" && !relayElementDataValid(message.elementData, message.elementId, message.isMerge === true)) return null;
+      // Deletes carry no elementData. Size/shape validation applies only to set
+      // payloads; payloadSize(undefined) would otherwise drop valid deletions.
+      if (message.actionType !== "delete" && (
+        payloadSize(message.elementData) > 64 * 1024 ||
+        containsForbiddenObjectKey(message.elementData) ||
+        !relayElementDataValid(message.elementData, message.elementId, message.isMerge === true)
+      )) return null;
       return { ...common, elementId: message.elementId, elementData: message.actionType === "delete" ? undefined : message.elementData, actionType: message.actionType, isMerge: message.isMerge === true };
     }
     case "timer_sync": {
