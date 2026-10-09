@@ -70,6 +70,10 @@ interface WhiteboardHeaderProps {
   onExportSelection?: () => void;
   hasSelection?: boolean;
   onExportBackup?: () => void;
+  onAddCover?: () => void;
+  onResetView?: () => void;
+  viewportLocked?: boolean;
+  onClearActiveAnnotations?: () => void;
   onToggleSpotlight?: () => void;
   isSpotlightActive?: boolean;
   copyBoardLink: () => void;
@@ -125,6 +129,10 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   onExportSelection,
   hasSelection,
   onExportBackup,
+  onAddCover,
+  onResetView,
+  viewportLocked=false,
+  onClearActiveAnnotations,
   onToggleSpotlight,
   isSpotlightActive = false,
   copyBoardLink,
@@ -708,6 +716,9 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
                 </button>
               )}
 
+              {onResetView && <button disabled={viewportLocked} title={viewportLocked ? "Stop following or presenting before resetting your personal view" : "Reset View"} onClick={()=>{onResetView();closeHeaderMenu();}} className="w-full px-3 py-2 text-xs text-left hover:bg-slate-50 rounded-xl">Reset View</button>}
+              {onAddCover && canManage && <button onClick={()=>{onAddCover();closeHeaderMenu();}} className="w-full px-3 py-2 text-xs text-left hover:bg-slate-50 rounded-xl">Cover Answer (selection or center)</button>}
+              {onClearActiveAnnotations && canManage && <button onClick={()=>{onClearActiveAnnotations();closeHeaderMenu();}} className="w-full px-3 py-2 text-xs text-left hover:bg-slate-50 rounded-xl">Clear Active Page Annotations...</button>}
               {onExportBackup && (
                 <button
                   onClick={() => {
@@ -717,7 +728,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
                   className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-slate-700 hover:bg-slate-50 transition-colors"
                 >
                   <FileCode className="w-4 h-4 text-emerald-600" />
-                  <span>Backup Board (.json)</span>
+                  <span>Complete Backup (.json)</span>
                 </button>
               )}
 
@@ -801,7 +812,7 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
                   className="w-full px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 text-rose-600 hover:bg-rose-50 transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
-                  <span>Clear Canvas...</span>
+                  <span>{isPdfBoard ? "Clear All Annotations..." : "Clear Canvas..."}</span>
                 </button>
               )}
             </div>

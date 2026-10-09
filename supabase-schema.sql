@@ -2956,6 +2956,7 @@ grant execute on function public.apply_board_mutations(text, jsonb) to authentic
 -- The earlier storage INSERT policy depended on storage object metadata during
 -- the INSERT check. Bucket limits already enforce MIME type and file size, so
 -- this policy keeps authorization strict while avoiding that fragile check.
+
 -- Ensure the private free-tier bucket exists and has conservative limits.
 insert into storage.buckets (
   id,
@@ -3065,6 +3066,7 @@ using (
 -- Allow board owners/admins to switch one redeemed member between editor and
 -- viewer without affecting the board-wide students_can_write master switch.
 -- Existing membership expiry is preserved.
+
 create or replace function public.update_board_member_role(
   p_board_id text,
   p_user_id uuid,
@@ -3117,6 +3119,7 @@ grant execute on function public.update_board_member_role(text, uuid, text) to a
 -- 1. Single-pass get_board_access to eliminate repeated boards/members reads
 -- 2. Batch asset metadata hydration in get_board_state to avoid N+1 asset queries
 -- 3. Administrator-only expired member and share link cleanup RPC
+
 -- Single-pass board authorization check
 create or replace function public.get_board_access(p_board_id text)
 returns jsonb

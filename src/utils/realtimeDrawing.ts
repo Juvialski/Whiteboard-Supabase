@@ -26,3 +26,8 @@ export function sampleRealtimeDrawingPoints(
   }
   return sampled;
 }
+
+/** Bound completed stroke previews too; Supabase retains the full stroke. */
+export function prepareRealtimeElementData<T extends {points?: Point[]}>(data:T):T {
+  return Array.isArray(data.points) ? {...data,points:sampleRealtimeDrawingPoints(data.points)} : data;
+}

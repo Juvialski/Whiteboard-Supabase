@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BoardElement, ShapeElement, TextElement } from '../types';
+import type { BoardElement, ShapeElement, TextElement, DrawingElement } from '../types';
 import { getBoardExportBounds, renderBoardRegionToCanvas } from './boardExport';
 
 function createContext() {
@@ -95,5 +95,18 @@ describe('board export rendering', () => {
     expect(context.translate).toHaveBeenCalledWith(1110, 20);
     expect(context.rotate).toHaveBeenCalledWith(Math.PI / 2);
     expect(context.drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 800, 1100);
+  });
+});
+
+describe('answer cover exports',()=>{
+  it('paints hidden covers above later drawings and omits revealed covers',async()=>{
+    const cover:ShapeElement={id:'cover-a',type:'shape',shapeType:'rect',answerCover:true,revealed:false,x:10,y:20,width:200,height:100,text:'',color:'#334155',borderColor:'#94a3b8',zIndex:1};
+    const drawing:DrawingElement={id:'draw-answer',type:'drawing',points:[{x:30,y:40},{x:60,y:70}],color:'#000',width:2,isHighlighter:false,zIndex:99};
+    const ctx=createContext();HTMLCanvasElement.prototype.getContext=vi.fn(()=>ctx) as any;
+    await renderBoardRegionToCanvas([cover,drawing],'lesson');
+    expect(ctx.fillRect).toHaveBeenCalledWith(10,20,200,100);
+    expect((ctx.fillRect as any).mock.invocationCallOrder.at(-1)).toBeGreaterThan((ctx.stroke as any).mock.invocationCallOrder.at(-1));
+    const revealedContext=createContext();HTMLCanvasElement.prototype.getContext=vi.fn(()=>revealedContext) as any;
+    const revealed=await renderBoardRegionToCanvas([{...cover,revealed:true}],'lesson');expect(revealed.canvas.getContext('2d')!.fillRect).not.toHaveBeenCalledWith(10,20,200,100);
   });
 });

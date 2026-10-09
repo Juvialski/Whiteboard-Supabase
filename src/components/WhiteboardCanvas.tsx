@@ -23,7 +23,11 @@ import { createSecureBoardShareLink } from "../services/shareLinkService";
 import LiveReactions, { FloatingReaction } from "./LiveReactions";
 import SpotlightOverlay from "./SpotlightOverlay";
 import { exportSelectionImage } from "../utils/boardExport";
-import { exportBoardBackup } from "../utils/boardBackup";
+import { downloadBoardBackup } from "../utils/boardBackup";
+import { createCompleteBackup, prepareClearRecovery } from "../services/boardTransfer";
+import { annotationIds, readPreferences, writePreferences, rememberBoard } from "../utils/classroomPreferences";
+import AnswerCover from './AnswerCover';
+import { useViewportPreferences } from '../hooks/useViewportPreferences';
 import {
   listBoardMembers,
   updateBoardMemberRole,
@@ -115,7 +119,7 @@ import WorkspaceTimer from "./WorkspaceTimer";
 import { useBoardTimer } from "../hooks/useBoardTimer";
 import { calculatePdfPageReflowPositions, exportPdfWithDrawings } from "../utils/pdf";
 import { exportBoardImage } from "../utils/boardExport";
-import { sampleRealtimeDrawingPoints } from "../utils/realtimeDrawing";
+import { sampleRealtimeDrawingPoints, prepareRealtimeElementData } from "../utils/realtimeDrawing";
 
 interface CompressedImage {
   base64Str: string;
@@ -433,10 +437,15 @@ export default function WhiteboardCanvas({
 }: WhiteboardCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
+  const preferenceUser = auth.currentUser?.uid || '';
+  const savedPreferences = React.useMemo(() => readPreferences(preferenceUser,boardId),[preferenceUser,boardId]);
+  const [bookmarks,setBookmarks] = useState<Record<string,string>>(savedPreferences.bookmarks || {});
+  const [clearActivePage,setClearActivePage] = useState(false);
+  const transferBusy = useRef(false);
   // Canvas Viewport State
-  const [panX, setPanX] = useState(window.innerWidth / 2 - 400);
-  const [panY, setPanY] = useState(window.innerHeight / 2 - 300);
-  const [zoom, setZoom] = useState(1);
+  const [panX, setPanX] = useState(savedPreferences.viewport?.panX ?? window.innerWidth / 2 - 400);
+  const [panY, setPanY] = useState(savedPreferences.viewport?.panY ?? window.innerHeight / 2 - 300);
+  const [zoom, setZoom] = useState(savedPreferences.viewport?.zoom ?? 1);
 
   const panXRef = useRef(panX);
   const panYRef = useRef(panY);
@@ -690,7 +699,7 @@ export default function WhiteboardCanvas({
           applyRemoteOperation(boardId, {
             operationId: `ws-${String(msg.userId || 'peer')}-${++remoteOperationSequenceRef.current}-${elementId}-${actionType}`,
             clientId: String(msg.userId || 'peer'),
-            baseRevision: 0,
+            // Relay previews have no committed database revision.
             elementId,
             action: actionType,
             data: actionType === 'delete' ? null : elementData,
@@ -1223,6 +1232,9 @@ export default function WhiteboardCanvas({
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
   const canWrite = isSandboxEnvironment() || (permissions.canWrite && !isPresenterLocked);
   const canManage = isSandboxEnvironment() || permissions.canManage || isOwner;
+  useViewportPreferences(preferenceUser,boardId,{panX,panY,zoom},view=>{setPanX(view.panX);setPanY(view.panY);setZoom(view.zoom);},isHydrated,Boolean(followedUserId || isPresenterLocked || isPresenterMode));
+  useEffect(()=>{setBookmarks(savedPreferences.bookmarks || {});},[savedPreferences]);
+  useEffect(()=>{rememberBoard(preferenceUser,boardId);},[preferenceUser,boardId]);
   const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
   const isTeacher = canManage;
   canManageRef.current = canManage;
@@ -1298,6 +1310,15 @@ export default function WhiteboardCanvas({
   const isPdfBoard = boardName.startsWith("PDF: ") || pdfPages.length > 0;
   const [isAppendingPdf, setIsAppendingPdf] = useState(false);
   const [hasCentered, setHasCentered] = useState(false);
+  useEffect(()=>{setHasCentered(false);},[boardId]);
+  useEffect(()=>{
+    if (!isHydrated || hydratedBoardIdRef.current !== boardId) return;
+    const liveIds = new Set(pdfPages.map(p=>p.id));
+    const next = Object.fromEntries(Object.entries(bookmarks).filter(([id])=>liveIds.has(id)));
+    if (Object.keys(next).length !== Object.keys(bookmarks).length) {
+      setBookmarks(next);const p=readPreferences(preferenceUser,boardId);p.bookmarks=next;writePreferences(preferenceUser,p,boardId);
+    }
+  },[isHydrated,boardId,pdfPages,bookmarks,preferenceUser]);
 
   // Mirror refs for multi-touch and touch gesture synchronization
   const activeToolRef = useRef(activeTool);
@@ -1373,7 +1394,7 @@ export default function WhiteboardCanvas({
   }, [showSyncToast]);
 
   useEffect(() => {
-    if (isPdfBoard && pdfPages.length > 0 && !hasCentered && containerRef.current) {
+    if (isPdfBoard && pdfPages.length > 0 && !hasCentered && !savedPreferences.viewport && !followedUserId && !isPresenterLocked && containerRef.current) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       pdfPages.forEach((img) => {
         minX = Math.min(minX, img.x);
@@ -1392,7 +1413,7 @@ export default function WhiteboardCanvas({
       setPanY(64 - minY * newZoom);
       setHasCentered(true);
     }
-  }, [isPdfBoard, pdfPages, hasCentered]);
+  }, [isPdfBoard, pdfPages, hasCentered, savedPreferences.viewport, followedUserId, isPresenterLocked]);
 
   const handleToggleZenMode = () => {
     const nextZenMode = !isZenMode;
@@ -1773,7 +1794,7 @@ export default function WhiteboardCanvas({
     const isDrawing = (elementData && elementData.type === 'drawing') || 
                       (actionType === 'delete' && currentElements.find(el => el.id === elementId)?.type === 'drawing');
 
-    let processedData = elementData ? sanitizeForSupabase(elementData) : elementData;
+    let processedData = elementData ? {...sanitizeForSupabase(elementData),updatedAt:Date.now(),updatedByClientId:auth.currentUser?.uid || currentUser.id} : elementData;
     if (isDrawing && elementData && elementData.type === 'drawing') {
       processedData = {
         ...processedData,
@@ -1830,14 +1851,14 @@ export default function WhiteboardCanvas({
         type: "element_update",
         boardId,
         elementId,
-        elementData: actionType === 'delete' ? undefined : processedData,
+        elementData: actionType === 'delete' ? undefined : prepareRealtimeElementData(processedData),
         actionType,
         isMerge
       }));
     }
 
     setSyncStatus('pending-local');
-  }, [boardId, setElements, setSyncStatus, triggerReadOnlyAlert]);
+  }, [boardId, currentUser.id, setElements, setSyncStatus, triggerReadOnlyAlert]);
 
   // Boards created before PDF deletion compacting can still contain a large
   // gap where a removed page used to be. Some older deletes also left behind
@@ -3266,15 +3287,9 @@ export default function WhiteboardCanvas({
     if (activeTool === "pencil" || activeTool === "highlighter") {
       isDrawingRef.current = false;
 
-      // Notify remote peers that the active stream has finished and is now being committed
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: "drawing_stream_end",
-          boardId,
-          userId: currentUser.id
-        }));
-      }
-
+      const endDrawingStream = () => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:'drawing_stream_end',boardId,userId:currentUser.id}));
+      };
       const points = drawingPointsRef.current;
 
       if (points.length >= 1) {
@@ -3290,6 +3305,7 @@ export default function WhiteboardCanvas({
         if (points.length > 1 && totalLength < 2) {
           drawingPointsRef.current = [];
           if (localDrawingPathRef.current) localDrawingPathRef.current.setAttribute("d", "");
+          endDrawingStream();
           return;
         }
 
@@ -3297,6 +3313,7 @@ export default function WhiteboardCanvas({
         if (!isTeacherRef.current && !checkCreationRateLimit(12, 3000)) {
           drawingPointsRef.current = [];
           if (localDrawingPathRef.current) localDrawingPathRef.current.setAttribute("d", "");
+          endDrawingStream();
           return;
         }
 
@@ -3324,6 +3341,7 @@ export default function WhiteboardCanvas({
           console.error("Error saving sketch:", err);
         }
       }
+      endDrawingStream();
       drawingPointsRef.current = [];
       if (localDrawingPathRef.current) localDrawingPathRef.current.setAttribute("d", "");
       return;
@@ -3867,48 +3885,28 @@ export default function WhiteboardCanvas({
     }
   }, [selectedIds, selectedId, canWrite, triggerReadOnlyAlert, elements, saveElementLocallyAndSync]);
 
-  // Clear all items on the board
+  // Clearing uses a complete portable snapshot, recovered into a separate board.
   const handleClearBoard = async () => {
-    if (!canWrite) {
-      triggerReadOnlyAlert();
-      return;
-    }
-
-    const elementsToKeep = elements.filter(el => typeof el?.id === "string" && el.id.startsWith("pdf-page-"));
-    const elementsToDelete = elements.filter(el => typeof el?.id === "string" && !el.id.startsWith("pdf-page-"));
-    const sandbox = isSandboxEnvironment();
-
+    if (!canManage || !canWrite || transferBusy.current) return;
+    transferBusy.current = true;
+    const snapshot = [...elementsRef.current];
+    const activePage = pdfPages[activePdfPageIndex];
+    if (clearActivePage && !activePage) {transferBusy.current=false;showSyncToast('Active PDF page is unavailable. Nothing was cleared.','error');return;}
+    const ids = annotationIds(snapshot,pdfPages,clearActivePage ? pdfPages[activePdfPageIndex]?.id : undefined);
     try {
-      // Cloud deletes enter the durable queue before the visible canvas changes.
-      // Sandbox boards never touch the cloud queue, so retained PDF pages remain.
-      if (!sandbox) {
-        elementsToDelete.forEach((el) => {
-          queueElementMutation(boardId, el.id, null, 'delete');
-        });
-      }
-
-      setElements(elementsToKeep);
-      elementsRef.current = elementsToKeep;
-      setSelectedId(null);
-      setSelectedIds([]);
-      setUndoStack([]);
-      setRedoStack([]);
-
-      if (sandbox) {
-        saveSandboxLocalElements(boardId, elementsToKeep);
-        hasUnsavedChanges.current = false;
-        setSyncStatus('synced');
-        return;
-      }
-
-      setSyncStatus('saving-cloud');
-      await flushBoardCheckpoint(boardId, 'clearBoard');
-      setSyncStatus(getBoardSaveStatus(boardId));
-    } catch (err: any) {
-      console.error("Error clearing whiteboard:", err);
-      setSyncStatus(getBoardSaveStatus(boardId) === 'failed' ? 'failed' : 'offline');
-      showSyncToast("Clear failed: " + (err?.message || 'Error'), "error", 10000);
-    }
+      showSyncToast('Preparing complete recovery snapshot...', 'info');
+      const backup = await prepareClearRecovery({name:boardName,description:boardData?.description},snapshot,boardId,()=>elementsRef.current,()=>canWriteRef.current && canManageRef.current);
+      downloadBoardBackup(backup);
+      if (!window.confirm('A complete recovery archive download has been requested. Confirm that it has finished saving before clearing. Ctrl+Z cannot undo this action; restore the archive as a separate board from the dashboard.')) return;
+      if (JSON.stringify(elementsRef.current) !== JSON.stringify(snapshot) || !canWriteRef.current || !canManageRef.current) throw new Error('The board changed or your permission changed. Nothing was cleared; retry with a fresh snapshot.');
+      const keep = elementsRef.current.filter(e=>!ids.has(e.id));
+      if (!isSandboxEnvironment()) for (const id of ids) queueElementMutation(boardId,id,null,'delete');
+      setElements(keep);elementsRef.current=keep;setSelectedId(null);setSelectedIds([]);setUndoStack([]);setRedoStack([]);
+      if (isSandboxEnvironment()) saveSandboxLocalElements(boardId,keep);
+      else {await flushBoardCheckpoint(boardId,'clear-with-snapshot');setSyncStatus(getBoardSaveStatus(boardId));}
+      showSyncToast('Annotations cleared. Keep the downloaded archive; restore it as a separate board from the dashboard.','success');
+    } catch(error) {showSyncToast(error instanceof Error ? error.message : 'Clear failed.','error',10000);}
+    finally {transferBusy.current=false;}
   };
 
   // Toggle student writing permission on the board (Teacher/CanManage Only)
@@ -3997,20 +3995,27 @@ export default function WhiteboardCanvas({
     }
   }, [boardId, currentUser.name, currentUser.color]);
 
-  const handleExportBackup = React.useCallback(() => {
+  const handleExportBackup = React.useCallback(async () => {
+    if (transferBusy.current || !isHydrated) return;
+    transferBusy.current=true;
     try {
-      exportBoardBackup({
-        name: boardName,
-        description: boardData?.description,
-        studentName: boardData?.studentName,
-        studentsCanWrite: boardData?.studentsCanWrite,
-      }, elements);
-      showSyncToast("Board backup exported", "success");
-    } catch (err) {
-      console.error("Failed to export backup:", err);
-      showSyncToast("Failed to export backup", "error");
-    }
-  }, [boardData, boardName, elements, showSyncToast]);
+      const archive = await createCompleteBackup({name:boardName,description:boardData?.description},[...elementsRef.current],boardId,message=>showSyncToast(message,'info'));
+      downloadBoardBackup(archive);showSyncToast('Complete board archive downloaded','success');
+    } catch(error) {showSyncToast(error instanceof Error ? error.message : 'Backup failed','error');}
+    finally {transferBusy.current=false;}
+  },[boardId,boardData,boardName,isHydrated,showSyncToast]);
+  const handleAddCover = async () => {
+    if (!canManage || !canWrite) return;
+    const bounds = elementsRef.current.filter(e=>selectedIds.includes(e.id)).map(getElementBounds).filter(Boolean) as ElementBounds[];
+    const x = bounds.length ? Math.min(...bounds.map(b=>b.x))-8 : (window.innerWidth/2-panX)/zoom;
+    const y = bounds.length ? Math.min(...bounds.map(b=>b.y))-8 : (window.innerHeight/2-panY)/zoom;
+    const width = bounds.length ? Math.max(...bounds.map(b=>b.x+b.width))-x+8 : 240;
+    const height = bounds.length ? Math.max(...bounds.map(b=>b.y+b.height))-y+8 : 100;
+    const id = `cover-${crypto.randomUUID()}`;
+    try {await saveElementLocallyAndSync(id,{id,type:'shape',shapeType:'rect',x,y,width,height,text:'',color:'#334155',borderColor:'#94a3b8',answerCover:true,revealed:false,zIndex:Math.max(0,...elementsRef.current.map(e=>e.zIndex || 0))+1} as ShapeElement);
+    setActiveTool('select');setSelectedIds([id]);setSelectedId(id);}
+    catch(error){showSyncToast(error instanceof Error ? error.message : 'Cover creation failed','error');}
+  };
 
   const handleExportSelection = React.useCallback(async () => {
     if (selectedIds.length === 0) return;
@@ -4207,6 +4212,10 @@ export default function WhiteboardCanvas({
         onExportSelection={handleExportSelection}
         hasSelection={selectedIds.length > 0}
         onExportBackup={handleExportBackup}
+        onAddCover={handleAddCover}
+        viewportLocked={Boolean(followedUserId || isPresenterLocked || isPresenterMode)}
+        onResetView={()=>{if(isPresenterLocked || followedUserId || isPresenterMode)return;setPanX(window.innerWidth/2-400);setPanY(window.innerHeight/2-300);setZoom(1);}}
+        onClearActiveAnnotations={isPdfBoard ? ()=>{setClearActivePage(true);setIsClearModalOpen(true);} : undefined}
         onToggleSpotlight={() => setIsSpotlightActive((prev) => !prev)}
         isSpotlightActive={isSpotlightActive}
         currentUser={currentUser}
@@ -4238,7 +4247,7 @@ export default function WhiteboardCanvas({
         onToggleTimer={handleToggleTimerVisibility}
         isTimerOpen={isTimerOpen}
         onOpenShortcuts={() => setIsShortcutsOpen(true)}
-        onOpenClearModal={() => setIsClearModalOpen(true)}
+        onOpenClearModal={() => {setClearActivePage(false);setIsClearModalOpen(true);}}
       />
 
       {/* Subtle Floating Toggle Button to Show Header when Hidden */}
@@ -4378,7 +4387,7 @@ export default function WhiteboardCanvas({
           {/* 1. Interactive DOM elements Layer (Sticky notes, Shapes, Textboxes) */}
           <div className="absolute inset-0 pointer-events-none z-10">
             {sortedElements.map((el) => {
-              if (el.type === "drawing") return null;
+              if (el.type === "drawing" || (el.type === "shape" && el.answerCover)) return null;
               
               const isSelected = selectedIds.includes(el.id);
               const isInteractive =
@@ -4404,6 +4413,10 @@ export default function WhiteboardCanvas({
                 />
               );
             })}
+          </div>
+
+          <div className="absolute inset-0 pointer-events-none z-30">
+            {sortedElements.filter((e):e is ShapeElement=>e.type==='shape' && e.answerCover===true).map(cover=><AnswerCover key={cover.id} element={cover} canManage={canManage && canWrite} isSelected={selectedIds.includes(cover.id)} onSelect={e=>handleSelectElement(cover.id,e)} onToggle={()=>{if(canManage && canWrite)handleUpdateElement(cover.id,{revealed:!cover.revealed} as Partial<ShapeElement>);}}/>)}
           </div>
 
           {/* 1.5. Connection Sockets Handles Overlay (shown when Connector Tool is active) */}
@@ -4760,7 +4773,9 @@ export default function WhiteboardCanvas({
         isOpen={isClearModalOpen}
         onClose={() => setIsClearModalOpen(false)}
         onConfirm={handleClearBoard}
-        elementCount={elements.length}
+        elementCount={annotationIds(elements,pdfPages,clearActivePage ? pdfPages[activePdfPageIndex]?.id : undefined).size}
+        activePageOnly={clearActivePage}
+        isPdfBoard={isPdfBoard}
       />
 
       {/* Kami Page Navigation Bar for PDF boards */}
@@ -4769,7 +4784,14 @@ export default function WhiteboardCanvas({
           boardId={boardId}
           pdfPages={pdfPages}
           currentPageIndex={activePdfPageIndex}
-          onJumpToPage={handleJumpToPdfPage}
+          onJumpToPage={index=>{if(!isPresenterLocked)handleJumpToPdfPage(index);}}
+          bookmarks={bookmarks}
+          onBookmarkPage={(id,label)=>{
+            const next = {...bookmarks};
+            if (next[id]) delete next[id];
+            else {const entered=window.prompt('Bookmark label',label);if(entered===null)return;next[id]=entered.trim().slice(0,100) || label;}
+            setBookmarks(next);const p=readPreferences(preferenceUser,boardId);p.bookmarks=next;writePreferences(preferenceUser,p,boardId);
+          }}
           onRotatePage={handleRotatePdfPage}
           onDeletePage={handleDeletePdfPage}
           onMovePage={handleMovePdfPage}

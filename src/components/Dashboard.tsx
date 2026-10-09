@@ -1,5 +1,8 @@
+import { duplicateCompleteBoard, restoreBoardArchive } from '../services/boardTransfer';
+import { parseBoardBackup, MAX_ARCHIVE_BYTES } from '../utils/boardBackup';
+import { readPreferences, writePreferences, rememberBoard, boardsForUser } from '../utils/classroomPreferences';
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, getDocs, onSnapshot, addDoc, deleteDoc, doc, setDoc, orderBy, limit, startAfter } from '../lib/supabaseDb';
+import { collection, query, where, getDocs, onSnapshot, addDoc, deleteDoc, doc, setDoc, orderBy, limit, startAfter } from '../lib/supabaseDb';
 import { db, auth, supabase } from '../supabase';
 import { Whiteboard, UserProfile } from '../types';
 import { Plus, Trash2, ArrowRight, User, BookOpen, GraduationCap, Users, Sparkles, Copy, Check, FileUp, Loader2, BarChart2, RefreshCw, ShieldCheck, Database, Pencil, X, Search } from 'lucide-react';
@@ -64,7 +67,16 @@ export default function Dashboard({
   onSignOut,
   adminClaim = false
 }: DashboardProps) {
+  const preferenceUser = auth.currentUser?.uid || '';
+  const [preferences, setPreferences] = useState(() => readPreferences(preferenceUser));
+  const [shortcutState,setShortcutState] = useState<{user:string;boards:Whiteboard[]}>({user:'',boards:[]});
+  const [preferencesOwner,setPreferencesOwner] = useState(preferenceUser);
+  const safePreferences = preferencesOwner === preferenceUser ? preferences : readPreferences(preferenceUser);
+  const [transferProgress, setTransferProgress] = useState('');
+  const [isRestoring, setIsRestoring] = useState(false);
+  useEffect(() => {setPreferencesOwner(preferenceUser);setPreferences(readPreferences(preferenceUser));}, [preferenceUser]);
   const [boards, setBoards] = useState<Whiteboard[]>([]);
+  const [boardListUser,setBoardListUser] = useState(preferenceUser);
   const [authError, setAuthError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
@@ -513,6 +525,9 @@ export default function Dashboard({
   const fetchBoards = React.useCallback(async (page: number = 1) => {
     const normalizedPage = Math.max(1, Math.trunc(page));
     const requestId = ++boardListRequestRef.current;
+    const requestUser = auth.currentUser?.uid || '';
+    setBoardListUser(requestUser);
+    if (requestUser !== boardListUser) setBoards([]);
 
     if (isSandboxEnvironment()) {
       const loadedBoards = getSandboxLocalBoards().sort((a, b) => b.createdAt - a.createdAt);
@@ -560,7 +575,7 @@ export default function Dashboard({
           'The secure list_my_boards_page RPC is unavailable. Apply the current Supabase migrations before deploying this client.'
         );
       }
-      if (requestId !== boardListRequestRef.current) return;
+      if (requestId !== boardListRequestRef.current || requestUser !== (auth.currentUser?.uid || '')) return;
 
       const pageRows = rpcData.slice(0, PAGE_SIZE);
       const loadedBoards = pageRows.map((row: any) => {
@@ -611,7 +626,7 @@ export default function Dashboard({
       setCurrentPage(normalizedPage);
       setHasMore(rpcData.length > PAGE_SIZE);
     } catch (err) {
-      if (requestId !== boardListRequestRef.current) return;
+      if (requestId !== boardListRequestRef.current || requestUser !== (auth.currentUser?.uid || '')) return;
       console.error('Error fetching whiteboards:', err);
       setAuthError(err instanceof Error ? err.message : String(err));
       setBoards([]);
@@ -897,6 +912,7 @@ export default function Dashboard({
       localStorage.setItem('lucid_spark_user_id', profile.id);
     }
 
+    rememberBoard(preferenceUser,board.id);
     onSelectBoard(board.id, profile, board.name);
   };
 
@@ -931,51 +947,46 @@ export default function Dashboard({
 
   const handleDuplicateBoard = async (board: Whiteboard, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (isDuplicatingId) return;
+    if (isDuplicatingId || isRestoring) return;
     setIsDuplicatingId(board.id);
 
     try {
-      const copyTitle = `Copy of ${board.name}`;
-      const newBoardData: Omit<Whiteboard, 'id'> = {
-        name: copyTitle,
-        description: board.description || '',
-        createdBy: currentUserProfile?.name || userName || 'Teacher',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        studentId: board.studentId || '',
-        studentName: board.studentName || '',
-        studentsCanWrite: board.studentsCanWrite !== false,
-        accessMode: 'shared',
-      };
-
-      if (isSandboxEnvironment()) {
-        const newId = `board-${Date.now()}`;
-        const newBoardObj = { id: newId, ...newBoardData };
-        const currentBoards = getSandboxLocalBoards();
-        saveSandboxLocalBoards([newBoardObj, ...currentBoards]);
-        
-        const existingElements = localStorage.getItem(`lucid_spark_board_elements_${board.id}`);
-        if (existingElements) {
-          localStorage.setItem(`lucid_spark_board_elements_${newId}`, existingElements);
-        }
-        setBoards((prev) => [newBoardObj, ...prev]);
-      } else {
-        const docRef = await addDoc(collection(db, 'whiteboards'), newBoardData);
-        setBoards((prev) => [{ id: docRef.id, ...newBoardData }, ...prev]);
-      }
-    } catch (err) {
-      console.error('Error duplicating board:', err);
-      alert('Failed to duplicate board.');
-    } finally {
-      setIsDuplicatingId(null);
-    }
+      const copy = await duplicateCompleteBoard(board,currentUserProfile?.name || userName || 'Teacher',setTransferProgress);
+      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[copy,...prev]);
+    } catch (error) {alert(error instanceof Error ? error.message : 'Duplication failed.');}
+    finally {setIsDuplicatingId(null);setTransferProgress('');}
+  };
+  useEffect(() => {
+    let active = true;
+    const ids = [...new Set([...safePreferences.favorites,...safePreferences.recent])];
+    if (!preferenceUser || !ids.length) {setShortcutState({user:preferenceUser,boards:[]});return;}
+    if (isSandboxEnvironment()) {setShortcutState({user:preferenceUser,boards:getSandboxLocalBoards().filter(b=>ids.includes(b.id))});return;}
+    void getDocs(query(collection(db,'whiteboards'),where('id','in',ids),where('status','==','ready'))).then(snapshot=>{
+      if (active && auth.currentUser?.uid === preferenceUser) setShortcutState({user:preferenceUser,boards:snapshot.docs.map(d=>({id:d.id,...d.data()} as Whiteboard))});
+    }).catch(()=>{if(active)setShortcutState({user:preferenceUser,boards:[]});});
+    return ()=>{active=false;};
+  },[preferenceUser,safePreferences.favorites.join(','),safePreferences.recent.join(',')]);
+  const handleRestore = async (file: File) => {
+    if (isRestoring || isDuplicatingId || !canCreateBoards) return;
+    setIsRestoring(true);
+    try {
+      if (file.size > MAX_ARCHIVE_BYTES) throw new Error('Archive exceeds 256 MB.');
+      const archive = parseBoardBackup(await file.text());
+      const restored = await restoreBoardArchive(archive,`Restored ${archive.board.name}`,currentUserProfile?.name || userName || 'Teacher',setTransferProgress);
+      if ((auth.currentUser?.uid || '') === preferenceUser) setBoards(prev=>[restored,...prev]);
+    } catch(error) {alert(error instanceof Error ? error.message : 'Restore failed.');}
+    finally {setIsRestoring(false);setTransferProgress('');}
+  };
+  const toggleFavorite = (id:string) => {
+    const p = readPreferences(preferenceUser);
+    p.favorites = p.favorites.includes(id) ? p.favorites.filter(x=>x!==id) : [id,...p.favorites].slice(0,100);
+    writePreferences(preferenceUser,p);setPreferences(p);
   };
 
   const currentName = currentUserProfile?.name || userName;
-  const visibleBoards = boards;
+  const visibleBoards = boardsForUser(boardListUser,preferenceUser,boards);
 
-  const filteredBoards = React.useMemo(() => {
-    return boards.filter((board) => {
+  const matchesBoardFilters = (board:Whiteboard) => {
       if (categoryTab === 'assigned' && !board.studentId) return false;
       if (categoryTab === 'shared' && (board.studentId || board.name.startsWith('PDF: '))) return false;
       if (categoryTab === 'pdf' && !board.name.startsWith('PDF: ')) return false;
@@ -988,8 +999,9 @@ export default function Dashboard({
         (board.studentName && board.studentName.toLowerCase().includes(q)) ||
         (board.createdBy && board.createdBy.toLowerCase().includes(q))
       );
-    });
-  }, [boards, categoryTab, boardSearchQuery]);
+  };
+  const filteredBoards = visibleBoards.filter(matchesBoardFilters);
+  const shortcutBoards = shortcutState.user === preferenceUser ? shortcutState.boards.filter(matchesBoardFilters) : [];
 
   return (
     <div className="h-full bg-slate-50 text-slate-800 flex flex-col font-sans overflow-y-auto" id="lucid-dashboard">
@@ -1387,6 +1399,16 @@ export default function Dashboard({
 
         {/* Board Listings */}
         <div className="lg:col-span-8 space-y-6">
+          {canCreateBoards && <label className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold bg-white border border-slate-200 rounded-xl cursor-pointer">
+            <FileUp className="w-4 h-4"/>Restore board archive
+            <input type="file" accept=".json" className="hidden" disabled={isRestoring || !!isDuplicatingId} onChange={e=>{const f=e.target.files?.[0];if(f)void handleRestore(f);e.target.value='';}}/>
+          </label>}
+          {transferProgress && <p role="status" className="text-xs text-blue-700">{transferProgress}</p>}
+          {[['Pinned',safePreferences.favorites],['Recently Opened',safePreferences.recent]].map(([label,ids]) => {
+            const available = (ids as string[]).map(id=>filteredBoards.find(b=>b.id===id) || shortcutBoards.find(b=>b.id===id)).filter(Boolean) as Whiteboard[];
+            return available.length ? <div key={label as string} className="flex items-center flex-wrap gap-2 text-xs"><strong>{label as string}</strong>{available.map(board=><button key={board.id} onClick={()=>handleJoinBoard(board)} className="px-2 py-1 bg-white border border-slate-200 rounded-lg truncate max-w-48">{board.name}</button>)}</div> : null;
+          })}
+
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
               <div>
@@ -1506,6 +1528,7 @@ export default function Dashboard({
                         </span>
                         
                         <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 lg:opacity-0 lg:group-hover:opacity-100 opacity-100 transition-opacity">
+                          {preferenceUser && <button title={safePreferences.favorites.includes(board.id) ? 'Unpin board':'Pin board'} aria-label={safePreferences.favorites.includes(board.id) ? 'Unpin board':'Pin board'} onClick={e=>{e.stopPropagation();toggleFavorite(board.id);}} className="p-1.5 text-amber-600">{safePreferences.favorites.includes(board.id) ? '★':'☆'}</button>}
                           {canManage && (
                             <button
                               onClick={(e) => handleOpenRenameModal(board, e)}
