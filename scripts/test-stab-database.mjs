@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { runQA2Integration } from './qa-2-integration.mjs';
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'whiteboard-stab-'));
 const port = await new Promise(resolve => {
   const server = net.createServer();
@@ -179,6 +180,10 @@ try {
   const insecure = await admin.query("select proname from pg_proc where pronamespace='public'::regnamespace and prosecdef and (not proconfig @> array['search_path=\"\"'] or has_function_privilege('anon',oid,'EXECUTE'))");
   check(insecure.rows, []);
   console.log(`Isolated PostgreSQL: ${names.length} upgrade migrations + canonical fresh schema; ${assertions} assertions passed.`);
+  if (process.argv.includes('--qa2')) {
+    const checks = await runQA2Integration(cluster, admin, { owner, editor, viewer, outsider });
+    console.log(`QA-2 relay/database integration: ${checks.length} scenarios passed.`);
+  }
 } finally {
   await Promise.allSettled(clients.map(client => client.end()));
   await cluster.stop();

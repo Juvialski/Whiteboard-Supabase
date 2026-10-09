@@ -1,1 +1,3 @@
 *.sql text eol=lf
+# Preserve PDF xref byte offsets on Windows checkouts.
+scripts/qa-2-fixtures/*.pdf binary

@@ -1,5 +1,11 @@
 import { vi } from 'vitest';
 
+// Tests must opt into a local fake transport. Accidental provider requests fail
+// closed even if a developer has production Vite configuration in their shell.
+global.fetch = vi.fn(async () => {
+  throw new Error('Network disabled in Vitest; mock requests explicitly.');
+}) as typeof fetch;
+
 // Mock WebSocket globally for tests
 class MockWebSocket {
   static CONNECTING = 0;

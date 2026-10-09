@@ -1,5 +1,7 @@
 # QA-1 production acceptance — 2026-10-09
 
+QA-2 follow-up: [isolated regression coverage and CI](QA-2.md), with [separate machine-readable evidence](QA-2-evidence.json). The hosted results below remain the historical QA-1 snapshot; local QA-2 passes do not replace hosted checks.
+
 **Verdict: INCOMPLETE.** Hosted checks: **42 PASS / 2 FAIL / 28 BLOCKED** across 72 explicitly defined scenarios. The two failed scenarios come from one deployed title/backup-metadata bug. Two confirmed bugs are fixed in this branch, including a separate local-sandbox restore issue. Fixes have not been deployed. Detailed scenario definitions, fingerprints, request evidence, and supplemental results are in [QA-1-evidence.json](QA-1-evidence.json). BLOCKED includes scenarios not executed; partial feature coverage is not full acceptance.
 
 ## Deployment evidence

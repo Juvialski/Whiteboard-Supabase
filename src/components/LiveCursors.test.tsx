@@ -3,12 +3,26 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import LiveCursors from './LiveCursors';
 import type { BoardElement, Collaborator } from '../types';
+import { cursorRectsOverlap } from '../utils/cursorPlacement';
 const peer: Collaborator = { id: 'peer', name: 'Alice', color: '#ff0000', x: 100, y: 100, lastActive: 1 };
 const props = { boardId: 'one', currentUser: { id: 'me', name: 'Me', color: '#000000' }, zoom: 1, panX: 0, panY: 0,
   viewportWidth: 600, viewportHeight: 400, elements: [] as BoardElement[] };
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 describe('smart live cursor overlay', () => {
+  it('keeps multiple peer labels apart and moves markers with content transforms without intercepting input', () => {
+    const ref = { current: { peer, second: { ...peer, id: 'second', name: 'Student', x: 102 } } };
+    const content = ['text', 'math', 'image', 'shape'].map((type, i) => ({ id: type, type, x: 350, y: i * 80, width: 150, height: 50, zIndex: 1 })) as BoardElement[];
+    const view = render(<LiveCursors {...props} elements={content} socketCollaboratorsRef={ref} />);
+    const badges = [...view.container.querySelectorAll('[data-cursor-badge]')] as HTMLElement[];
+    expect(badges).toHaveLength(2);
+    const bounds = (e: HTMLElement) => ({ x: parseFloat(e.style.left), y: parseFloat(e.style.top), width: parseFloat(e.style.width), height: parseFloat(e.style.height) });
+    expect(cursorRectsOverlap(bounds(badges[0]), bounds(badges[1]))).toBe(false);
+    view.rerender(<LiveCursors {...props} elements={content} socketCollaboratorsRef={ref} zoom={0.5} panX={40} panY={20} />);
+    const marker = view.container.querySelector('[data-cursor-id="second"]') as SVGElement;
+    expect(marker.style.left).toBe('86px'); expect(marker.style.top).toBe('65px');
+    for (const element of view.container.querySelectorAll('svg,span,#live-cursors-layer')) expect((element as HTMLElement).style.pointerEvents).toBe('none');
+  });
   it('renders subtle colored outlines, aligns with zoom/pan, and keeps subpixel live movement', async () => {
     const ref = { current: { peer: { ...peer } } };
     const { container, rerender } = render(<LiveCursors {...props} socketCollaboratorsRef={ref} />);

@@ -1,8 +1,9 @@
-﻿import React from 'react';
+import React from 'react';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import PdfPageNavigation from './PdfPageNavigation';
 import type { ImageElement } from '../types';
+import { readPreferences, writePreferences } from '../utils/classroomPreferences';
 
 const assetMocks = vi.hoisted(() => ({
   useBoardAsset: vi.fn(),
@@ -18,6 +19,33 @@ const mockPdfPages: ImageElement[] = [
 ];
 
 describe('PdfPageNavigation', () => {
+  it('uses stable bookmark IDs after reorder/deletion and isolates bookmarks across accounts on the same device', () => {
+    localStorage.clear();
+    writePreferences('teacher', { favorites: ['private'], recent: ['board-test'], bookmarks: { [mockPdfPages[1].id]: 'Algebra' }, viewport: { panX: 123, panY: -45, zoom: 1.75 } }, 'board-test');
+    writePreferences('student', { favorites: [], recent: [], bookmarks: { [mockPdfPages[0].id]: 'Student notes' } }, 'board-test');
+    const jump = vi.fn(), remove = vi.fn();
+    const props = { boardId: 'board-test', currentPageIndex: 0, onJumpToPage: jump, onDeletePage: remove, canWrite: true };
+    const view = render(<PdfPageNavigation {...props} pdfPages={mockPdfPages} bookmarks={readPreferences('teacher', 'board-test').bookmarks} />);
+    fireEvent.click(screen.getByTitle('Toggle PDF Page Drawer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Algebra' }));
+    expect(jump).toHaveBeenLastCalledWith(1);
+    const reordered = [...mockPdfPages].reverse();
+    view.rerender(<PdfPageNavigation {...props} pdfPages={reordered} bookmarks={readPreferences('teacher', 'board-test').bookmarks} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Algebra' }));
+    expect(jump).toHaveBeenLastCalledWith(0);
+    fireEvent.click(screen.getAllByTitle('Delete Page')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Page' }));
+    expect(remove).toHaveBeenCalledExactlyOnceWith(mockPdfPages[1].id);
+    view.rerender(<PdfPageNavigation {...props} pdfPages={[mockPdfPages[0]]} bookmarks={readPreferences('teacher', 'board-test').bookmarks} />);
+    expect(screen.queryByRole('button', { name: 'Algebra' })).toBeNull();
+    view.rerender(<PdfPageNavigation {...props} pdfPages={mockPdfPages} bookmarks={readPreferences('student', 'board-test').bookmarks} canWrite={false} />);
+    expect(screen.queryByRole('button', { name: 'Algebra' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Student notes' }));
+    expect(jump).toHaveBeenLastCalledWith(0);
+    expect(screen.queryByTitle('Delete Page')).toBeNull();
+    expect(readPreferences('student', 'board-test').viewport).toBeUndefined();
+    expect(readPreferences('teacher', 'board-test').viewport).toEqual({ panX: 123, panY: -45, zoom: 1.75 });
+  });
   beforeEach(() => {
     assetMocks.useBoardAsset.mockImplementation((
       _boardId: string | undefined,
