@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { renderHook, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { useViewportPreferences } from "./useViewportPreferences";
@@ -24,8 +24,9 @@ describe("personal viewport persistence", () => {
     const [view, setView] = useState(
       readPreferences(user, board).viewport || { panX: 0, panY: 0, zoom: 1 },
     );
-    useViewportPreferences(user, board, view, setView, true, controlled);
-    return { view, setView };
+    const keepCurrentViewOnRelease = useRef(false);
+    useViewportPreferences(user, board, view, setView, true, controlled, keepCurrentViewOnRelease);
+    return { view, setView, keepFollowedView: () => { keepCurrentViewOnRelease.current = true; } };
   }
   it("restores saved view and saves each user/board separately", () => {
     writePreferences(
@@ -60,6 +61,26 @@ describe("personal viewport persistence", () => {
     });
     rerender({ controlled: false });
     expect(result.current.view).toEqual({ panX: 15, panY: 25, zoom: 2 });
+  });
+  it("keeps the followed position when starting an edit but restores on an explicit later stop", () => {
+    const { result, rerender } = renderHook(useCamera, {
+      initialProps: { controlled: false },
+    });
+    act(() => result.current.setView({ panX: 15, panY: 25, zoom: 2 }));
+    rerender({ controlled: true });
+    act(() => result.current.setView({ panX: 900, panY: 800, zoom: 4 }));
+    act(() => result.current.keepFollowedView());
+    rerender({ controlled: false });
+    expect(result.current.view).toEqual({ panX: 900, panY: 800, zoom: 4 });
+    expect(readPreferences("teacher", "lesson").viewport).toEqual({
+      panX: 900, panY: 800, zoom: 4,
+    });
+
+    // The edit handoff applies to this release only: normal unfollow still restores.
+    rerender({ controlled: true });
+    act(() => result.current.setView({ panX: 2000, panY: 1800, zoom: 3 }));
+    rerender({ controlled: false });
+    expect(result.current.view).toEqual({ panX: 900, panY: 800, zoom: 4 });
   });
   it("flushes a quick navigation away without saving a followed viewport", () => {
     const { result, unmount, rerender } = renderHook(useCamera, {
