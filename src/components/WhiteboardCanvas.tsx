@@ -498,6 +498,9 @@ export default function WhiteboardCanvas({
   const [followedUserId, setFollowedUserId] = useState<string | null>(null);
   const followedUserIdRef = useRef<string | null>(null);
   followedUserIdRef.current = followedUserId;
+  // Only canvas interaction releases follow at the current camera position.
+  // Explicit Stop Following / Escape still restore the personal viewport.
+  const keepFollowedViewOnEditRef = useRef(false);
   const [presenterTeacherId, setPresenterTeacherId] = useState<string | null>(null);
   const [presenterTeacherName, setPresenterTeacherName] = useState<string | null>(null);
   const presenterTeacherIdRef = useRef<string | null>(null);
@@ -1241,7 +1244,15 @@ export default function WhiteboardCanvas({
   const studentsCanWrite = boardData?.studentsCanWrite !== false;
   const canWrite = isSandboxEnvironment() || (permissions.canWrite && !isPresenterLocked);
   const canManage = isSandboxEnvironment() || permissions.canManage || isOwner;
-  useViewportPreferences(preferenceUser,boardId,{panX,panY,zoom},view=>{setPanX(view.panX);setPanY(view.panY);setZoom(view.zoom);},isHydrated,Boolean(followedUserId || isPresenterLocked || isPresenterMode));
+  useViewportPreferences(
+    preferenceUser,
+    boardId,
+    { panX, panY, zoom },
+    view => { setPanX(view.panX); setPanY(view.panY); setZoom(view.zoom); },
+    isHydrated,
+    Boolean(followedUserId || isPresenterLocked || isPresenterMode),
+    keepFollowedViewOnEditRef,
+  );
   useEffect(()=>{setBookmarks(savedPreferences.bookmarks || {});},[savedPreferences]);
   useEffect(()=>{rememberBoard(preferenceUser,boardId);},[preferenceUser,boardId]);
   const displayedStudentsCanWrite = canManage ? studentsCanWrite : canWrite;
@@ -2588,6 +2599,10 @@ export default function WhiteboardCanvas({
     }
 
     if (followedUserId && !isPresenterLocked) {
+      // Do not restore the pre-follow camera while a pointer gesture is
+      // starting: it would change drawing coordinates mid-stroke.
+      keepFollowedViewOnEditRef.current = true;
+      followedUserIdRef.current = null;
       setFollowedUserId(null);
     }
 
