@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const mock = vi.hoisted(() => ({ listener: null as any, backup: vi.fn(), download: vi.fn(), queue: vi.fn() }));
+const mock = vi.hoisted(() => ({ listener: null as any, socketListener: null as any, backup: vi.fn(), download: vi.fn(), queue: vi.fn() }));
 vi.mock('../supabase', () => ({ auth: {currentUser:{uid:'qa-owner'}}, db:{}, supabase:{} }));
 vi.mock('pdfjs-dist', () => ({ GlobalWorkerOptions: {}, getDocument: vi.fn() }));
 vi.mock('../utils/pdf', async original => ({ ...await original<any>(), exportPdfWithDrawings:vi.fn(), pdfToImages:vi.fn() }));
@@ -16,11 +16,11 @@ vi.mock('../services/boardPersistence', () => ({
 }));
 vi.mock('../services/boardSocketService', () => ({
   getBoardSocketHandle:()=>({readyState:3,send:vi.fn()}),
-  subscribeBoardSocketMessages:()=>()=>{}, subscribeBoardSocketStatus:()=>()=>{},
+  subscribeBoardSocketMessages:(_id:any,cb:any)=>{mock.socketListener=cb;return()=>{};}, subscribeBoardSocketStatus:()=>()=>{},
 }));
 vi.mock('../hooks/useBoardTimer', () => ({useBoardTimer:()=>({state:null,error:null,busy:false,transition:vi.fn(),serverNow:Date.now})}));
 import WhiteboardCanvas from './WhiteboardCanvas';
-beforeEach(() => { localStorage.clear(); mock.queue.mockReset(); mock.backup.mockReset(); mock.download.mockReset(); mock.backup.mockResolvedValue({version:2,elements:[],assets:[]}); });
+beforeEach(() => { localStorage.clear(); mock.listener=null; mock.socketListener=null; mock.queue.mockReset(); mock.backup.mockReset(); mock.download.mockReset(); mock.backup.mockResolvedValue({version:2,elements:[],assets:[]}); });
 afterEach(cleanup);
 const user = {id:'qa-owner',name:'QA Teacher',color:'#000000',role:'teacher' as const};
 const ready = (id:string,name:string) => ({loadState:'ready',elements:[],boardData:{id,name,ownerUid:'qa-owner',createdBy:'QA Teacher',createdAt:1}});
@@ -57,6 +57,35 @@ it('uses the authorized saved lesson title after a direct-link reload and export
   expect(mock.backup.mock.calls[0][0].name).toBe('QA Algebra Lesson');
   await act(async()=>mock.listener(ready('qa-board','QA Renamed Lesson')));
   expect(screen.getByText('QA Renamed Lesson')).toBeTruthy();
+});
+it('keeps the live followed camera when a pencil stroke starts, without a long jump', async () => {
+  const view=render(<WhiteboardCanvas boardId="qa-follow" boardName="Follow lesson" currentUser={user} onBackToDashboard={()=>{}}/>);
+  await act(async()=>mock.listener(ready('qa-follow','Follow lesson')));
+  await act(async()=>mock.socketListener({
+    type:'cursor',userId:'student-1',name:'Student',color:'#ff0000',role:'student',
+    panX:900,panY:800,zoom:1,
+  }));
+  fireEvent.click(screen.getByTitle('People on this board'));
+  fireEvent.click(screen.getByRole('button',{name:'Follow'}));
+  expect(screen.getByText('Stop Following (Esc)')).toBeTruthy();
+
+  fireEvent.keyDown(window,{key:'p'});
+  const canvas=view.container.querySelector<HTMLElement>('.touch-none');
+  expect(canvas).not.toBeNull();
+  const layer=canvas!.querySelector<HTMLElement>('.absolute.inset-0.pointer-events-none');
+  expect(layer?.style.transform).toContain('translate(900px, 800px)');
+
+  fireEvent.pointerDown(canvas!,{button:0,clientX:100,clientY:120});
+  expect(screen.queryByText('Stop Following (Esc)')).toBeNull();
+  expect(layer?.style.transform).toContain('translate(900px, 800px)');
+  await act(async()=>{
+    fireEvent.pointerMove(canvas!,{button:0,clientX:115,clientY:130});
+    fireEvent.pointerUp(canvas!,{button:0,clientX:115,clientY:130});
+  });
+  const strokeCall=mock.queue.mock.calls.find((args:any[])=>args[2]?.type==='drawing');
+  expect(strokeCall).toBeTruthy();
+  const [start,end]=strokeCall![2].points;
+  expect(Math.hypot(end.x-start.x,end.y-start.y)).toBeLessThan(40);
 });
 it('does not display another board manifest title while changing boards', async () => {
   const view=render(<WhiteboardCanvas boardId="qa-old" boardName="Old fallback" currentUser={user} onBackToDashboard={()=>{}}/>);
