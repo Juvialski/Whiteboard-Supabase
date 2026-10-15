@@ -17,6 +17,7 @@ export function useViewportPreferences(
   restore: (view: PersonalViewport) => void,
   ready: boolean,
   controlled: boolean,
+  keepCurrentViewOnRelease?: { current: boolean },
 ): void {
   const scope = `${user}:${board}`;
   const callback = useRef(restore);
@@ -54,7 +55,17 @@ export function useViewportPreferences(
       return;
     }
     if (previous.controlled) {
-      callback.current(previous.personal);
+      // Editing after following is a viewport handoff, not an explicit
+      // "Stop Following" action. Keep the visible camera so a stroke's
+      // screen-to-canvas coordinates cannot jump mid-gesture.
+      const keepCurrent = keepCurrentViewOnRelease?.current === true;
+      if (keepCurrentViewOnRelease) keepCurrentViewOnRelease.current = false;
+      if (keepCurrent) {
+        state.current.personal = clampViewport(view);
+        save(state.current);
+      } else {
+        callback.current(previous.personal);
+      }
       return;
     }
     state.current.personal = view;
