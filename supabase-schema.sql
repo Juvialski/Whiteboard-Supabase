@@ -3437,7 +3437,7 @@ grant execute on function public.get_board_timer(text) to authenticated;
 grant execute on function public.transition_board_timer(text, bigint, text, integer) to authenticated;
 
 -- =====================================================================
--- SOURCE: supabase/migrations/20261104051713_timer_postgrest_conflict_retry.sql
+-- SOURCE: supabase/migrations/20261104053442_timer_postgrest_conflict_retry.sql
 -- =====================================================================
 -- Preserve direct SQL conflict semantics while preventing PostgREST 14 retry storms.
 create or replace function public.transition_board_timer(
