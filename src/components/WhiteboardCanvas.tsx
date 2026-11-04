@@ -3730,6 +3730,13 @@ export default function WhiteboardCanvas({
     handlePasteRef.current = handlePaste;
   }, [handlePaste]);
 
+  const handleDuplicateSelection = () => {
+    if (!canWrite) { triggerReadOnlyAlert(); return; }
+    const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
+    const selection = selectedElementsForCopy(elementsRef.current, ids);
+    if (selection.length) void handlePasteRef.current?.(selection, boardId);
+  };
+
   // Keyboard shortcut listeners (standard whiteboards experience!)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3744,10 +3751,7 @@ export default function WhiteboardCanvas({
       const key = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && key === "d" && !e.altKey && !e.shiftKey) {
         e.preventDefault();
-        if (!canWrite) { triggerReadOnlyAlert(); return; }
-        const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
-        const selection = selectedElementsForCopy(elementsRef.current, ids);
-        if (selection.length) void handlePasteRef.current?.(selection, boardId);
+        handleDuplicateSelection();
         return;
       }
       if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
@@ -4303,6 +4307,8 @@ export default function WhiteboardCanvas({
         redoStack={redoStack}
         handleUndo={handleUndo}
         handleRedo={handleRedo}
+        onDuplicate={handleDuplicateSelection}
+        canDuplicate={canWrite && (selectedIds.length > 0 || selectedId !== null)}
         onExportSelection={handleExportSelection}
         hasSelection={selectedIds.length > 0}
         onExportBackup={handleExportBackup}

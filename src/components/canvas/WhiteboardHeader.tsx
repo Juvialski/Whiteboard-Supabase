@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   Undo,
   Redo,
+  Copy,
   Video,
   Unlock,
   Lock,
@@ -44,6 +45,8 @@ interface WhiteboardHeaderProps {
   redoStack: any[];
   handleUndo: () => void;
   handleRedo: () => void;
+  onDuplicate?: () => void;
+  canDuplicate?: boolean;
   currentUser: UserProfile;
   socketCollaboratorsRef: React.MutableRefObject<Record<string, any>>;
   activeCollaboratorIds?: string[];
@@ -103,6 +106,8 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
   redoStack,
   handleUndo,
   handleRedo,
+  onDuplicate,
+  canDuplicate,
   currentUser,
   socketCollaboratorsRef,
   activeCollaboratorIds,
@@ -346,6 +351,12 @@ export const WhiteboardHeader: React.FC<WhiteboardHeaderProps> = ({
         </div>
 
         <div className="hidden sm:block h-5 w-px bg-slate-200 shrink-0" />
+
+        {onDuplicate && <button type="button" onClick={onDuplicate} disabled={!canDuplicate}
+          aria-label="Duplicate selection (Ctrl+D)" title="Duplicate selection (Ctrl+D)"
+          className="min-w-[36px] min-h-[36px] p-2 rounded-xl flex items-center justify-center shrink-0 text-slate-600 hover:bg-slate-100 disabled:text-slate-300 disabled:cursor-not-allowed">
+          <Copy className="w-4 h-4" />
+        </button>}
 
         <button
           onClick={handleUndo}
