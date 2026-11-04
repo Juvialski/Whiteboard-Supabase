@@ -741,6 +741,7 @@ export default function WhiteboardCanvas({
               color: msg.color || "#ef4444",
             },
           ];
+          wakeLaserAnimationRef.current();
         } else if (msg.type === "emoji_reaction") {
           if (msg.userId === currentUser.id) return;
           setIncomingReaction({
@@ -975,6 +976,7 @@ export default function WhiteboardCanvas({
   const localLaserPointsRef = useRef<LaserPoint[]>([]);
   const remoteLaserPointsRef = useRef<{ [userId: string]: LaserPoint[] }>({});
   const laserCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wakeLaserAnimationRef = useRef<() => void>(() => {});
 
   // Kami Tools Modals & Navigation States
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
@@ -1188,33 +1190,48 @@ export default function WhiteboardCanvas({
       ctx.globalAlpha = 1.0;
       ctx.fill();
     });
+    return streams.length > 0;
   };
 
-  // Continuous animation loop to decay fading laser trail points smoothly
+  // Render only while a local/remote laser trail exists. Previously this cleared
+  // a full-screen canvas at 60 fps for the entire lifetime of every open board.
   useEffect(() => {
-    let animId: number;
+    let animId: number | null = null;
+    let disposed = false;
     const tick = () => {
+      animId = null;
+      if (disposed || document.visibilityState === 'hidden') return;
       const canvas = laserCanvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          // Adjust canvas internal size to actual display size (supports high DPI)
-          const rect = canvas.getBoundingClientRect();
-          const dpr = window.devicePixelRatio || 1;
-          const width = Math.round(rect.width * dpr);
-          const height = Math.round(rect.height * dpr);
-          if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width;
-            canvas.height = height;
-            ctx.scale(dpr, dpr);
-          }
-          drawLaserTrails(ctx, rect.width, rect.height);
-        }
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) return;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
-      animId = requestAnimationFrame(tick);
+      // The final frame clears expired trails, then stops scheduling work.
+      if (drawLaserTrails(ctx, rect.width, rect.height)) requestFrame();
     };
-    animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
+    const requestFrame = () => {
+      if (!disposed && animId === null && document.visibilityState !== 'hidden') {
+        animId = requestAnimationFrame(tick);
+      }
+    };
+    wakeLaserAnimationRef.current = requestFrame;
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') requestFrame();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      wakeLaserAnimationRef.current = () => {};
+      if (animId !== null) cancelAnimationFrame(animId);
+    };
   }, []);
 
   // Permission states using getBoardPermissions
@@ -2309,6 +2326,7 @@ export default function WhiteboardCanvas({
     if (!canWrite && activeTool !== "select" && activeTool !== "pan") {
       setActiveTool("select");
       localLaserPointsRef.current = [];
+      wakeLaserAnimationRef.current();
     }
   }, [canWrite, activeTool]);
 
@@ -2634,6 +2652,7 @@ export default function WhiteboardCanvas({
       const color = activeColor || "#ef4444";
       const newPt = { x: coords.x, y: coords.y, timestamp: now, color };
       localLaserPointsRef.current = [...localLaserPointsRef.current.filter((p) => now - p.timestamp < 1500), newPt];
+      wakeLaserAnimationRef.current();
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -2887,6 +2906,7 @@ export default function WhiteboardCanvas({
       const color = activeColorRef.current || "#ef4444";
       const newPt = { x: coords.x, y: coords.y, timestamp: now, color };
       localLaserPointsRef.current = [...localLaserPointsRef.current.filter((p) => now - p.timestamp < 1500), newPt];
+      wakeLaserAnimationRef.current();
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && now - lastStreamBroadcast.current > 20) {
         lastStreamBroadcast.current = now;
