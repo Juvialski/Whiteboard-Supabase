@@ -3681,8 +3681,15 @@ export default function WhiteboardCanvas({
       }
 
       const updatedList = [...elementsRef.current, ...pastedElements];
-      pastedElements.forEach((element) => {
-        pushToUndo({ type: "add", elementId: element.id, afterData: element });
+      // Paste is a single user action: one Undo removes the whole copied group,
+      // including its remapped connectors. Redo restores the group together.
+      pushToUndo({
+        type: "batch",
+        actions: pastedElements.map((element) => ({
+          type: "add",
+          elementId: element.id,
+          afterData: element,
+        })),
       });
       setElements(updatedList);
       elementsRef.current = updatedList;
