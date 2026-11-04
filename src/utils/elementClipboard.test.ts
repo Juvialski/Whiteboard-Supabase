@@ -4,6 +4,7 @@ import {
   WHITEBOARD_CLIPBOARD_MIME,
   cloneElementsForPaste,
   readElementClipboard,
+  selectedElementsForCopy,
   serializeElementClipboard,
 } from './elementClipboard';
 
@@ -42,6 +43,13 @@ describe('whiteboard element clipboard', () => {
     expect(copies[2]).toMatchObject({ fromId: copies[0].id, toId: copies[1].id });
     expect(copies[3]).toMatchObject({ points: [{ x: 44, y: 48 }, { x: 58, y: 61 }] });
     expect(originals[0]).toMatchObject({ id: 'a', x: 20, y: 30 });
+  });
+
+  it('includes links between selected endpoints without adding unrelated connectors', () => {
+    const elements: BoardElement[] = [sticky('a'), sticky('b'), sticky('c'),
+      { id: 'ab', type: 'connector', fromId: 'a', toId: 'b', fromSocket: 'right', toSocket: 'left', color: '#000', zIndex: 1 },
+      { id: 'bc', type: 'connector', fromId: 'b', toId: 'c', fromSocket: 'right', toSocket: 'left', color: '#000', zIndex: 2 }];
+    expect(selectedElementsForCopy(elements, new Set(['a', 'b'])).map(e => e.id)).toEqual(['a', 'b', 'ab']);
   });
 
   it('moves a free-floating connector endpoint with its copied source', () => {

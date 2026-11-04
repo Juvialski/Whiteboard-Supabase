@@ -177,6 +177,7 @@ export default function Dashboard({
     };
 
     const refresh = () => {
+      if (document.visibilityState !== 'visible') return;
       void Promise.all([loadSettings(), fetchPresenceInitial()]);
     };
     const scheduleRefresh = () => {
@@ -197,12 +198,14 @@ export default function Dashboard({
     const poll = window.setInterval(refresh, 30_000);
     const handleFocus = () => refresh();
     window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
 
     return () => {
       active = false;
       if (refreshDebounce !== null) window.clearTimeout(refreshDebounce);
       window.clearInterval(poll);
       window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
       void supabase.removeChannel(channel);
     };
   }, [adminClaim, isAdminPanelOpen, refreshTrigger]);

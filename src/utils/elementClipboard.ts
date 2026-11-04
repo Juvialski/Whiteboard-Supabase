@@ -11,6 +11,13 @@ export interface ElementClipboardBundle {
   elements: BoardElement[];
 }
 
+// Connectors have no bounding rectangle for marquee selection. Include a link
+// when both of its endpoints are selected so copied groups retain their links.
+export function selectedElementsForCopy(elements: BoardElement[], ids: Set<string>): BoardElement[] {
+  return elements.filter(element => ids.has(element.id) ||
+    (element.type === 'connector' && !!element.toId && ids.has(element.fromId) && ids.has(element.toId)));
+}
+
 function parseBundle(payload: string): ElementClipboardBundle | null {
   if (!payload || payload.length > MAX_CLIPBOARD_LENGTH) return null;
   try {

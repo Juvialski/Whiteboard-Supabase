@@ -124,6 +124,7 @@ import {
   WHITEBOARD_CLIPBOARD_MIME,
   cloneElementsForPaste,
   readElementClipboard,
+  selectedElementsForCopy,
   serializeElementClipboard,
 } from "../utils/elementClipboard";
 
@@ -2463,7 +2464,7 @@ export default function WhiteboardCanvas({
           (focused instanceof HTMLElement && focused.isContentEditable)) return;
       const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
       if (!ids.size) return;
-      const chosen = elementsRef.current.filter((element) => ids.has(element.id));
+      const chosen = selectedElementsForCopy(elementsRef.current, ids);
       if (!chosen.length) return;
       try {
         const copies = JSON.parse(JSON.stringify(chosen)) as BoardElement[];
@@ -3652,7 +3653,7 @@ export default function WhiteboardCanvas({
     const sandbox = isSandboxEnvironment();
     const signature = sourceBoardId + ':' + itemsToPaste.map((element) => element.id).join('|');
     const repeatCount = signature === lastPasteSignatureRef.current ? repeatedPasteCountRef.current + 1 : 1;
-    const offset = 40 * Math.min(repeatCount, 10) / Math.max(0.05, zoomRef.current);
+    const offset = 40 * repeatCount / Math.max(0.05, zoomRef.current);
     const maxZ = elementsRef.current.reduce((max, element) => Math.max(max, element.zIndex || 0), 0);
     const newPasteIds: string[] = [];
     const pastedElements: BoardElement[] = [];
@@ -3745,7 +3746,7 @@ export default function WhiteboardCanvas({
         e.preventDefault();
         if (!canWrite) { triggerReadOnlyAlert(); return; }
         const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
-        const selection = elementsRef.current.filter(element => ids.has(element.id));
+        const selection = selectedElementsForCopy(elementsRef.current, ids);
         if (selection.length) void handlePasteRef.current?.(selection, boardId);
         return;
       }

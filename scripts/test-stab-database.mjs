@@ -104,6 +104,9 @@ try {
   const results = await Promise.allSettled([change(writer, 4, 'adjust', 10), change(editorClient, 4, 'adjust', 60)]);
   check(results.filter(result => result.status === 'fulfilled').length, 1);
   check(results.find(result => result.status === 'rejected').reason.code, '40001');
+  await writer.query("select set_config('request.method','POST',false)");
+  await denied(change(writer, 4, 'adjust', 10), 'P0001');
+  await writer.query("select set_config('request.method','',false)");
   payload = await get(reader); check(payload.timer.revision, 5);
   payload = await change(writer, 5, 'visibility', 0); check(payload.timer.visible, false);
   payload = await change(writer, 6, 'mode', 1); check(payload.timer.baseline_ms, 0);
