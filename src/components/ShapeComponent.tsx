@@ -659,11 +659,11 @@ export default function ShapeComponent({
     const animate = (time: number) => {
       animId = null;
       if (disposed || document.visibilityState === 'hidden') return;
-      const delta = Math.max(0, Math.min((time - lastTime) / 1000, 0.1));
-      lastTime = time;
       // Redraw at most 30fps. Calculation and canvas rendering are still live
       // locally, while collaborative storage is changed only on user actions.
       if (time - lastPaintTime >= 33) {
+        const delta = Math.max(0, Math.min((time - lastTime) / 1000, 0.1));
+        lastTime = time;
         lastPaintTime = time;
         setCartesianVariables((prev) => {
           let updated = false;
