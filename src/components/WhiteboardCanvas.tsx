@@ -120,6 +120,12 @@ import { useBoardTimer } from "../hooks/useBoardTimer";
 import { calculatePdfPageReflowPositions, exportPdfWithDrawings } from "../utils/pdf";
 import { exportBoardImage } from "../utils/boardExport";
 import { sampleRealtimeDrawingPoints, prepareRealtimeElementData } from "../utils/realtimeDrawing";
+import {
+  WHITEBOARD_CLIPBOARD_MIME,
+  cloneElementsForPaste,
+  readElementClipboard,
+  serializeElementClipboard,
+} from "../utils/elementClipboard";
 
 interface CompressedImage {
   base64Str: string;
@@ -469,7 +475,10 @@ export default function WhiteboardCanvas({
   // retains only unsynced mutations and is merged after access is verified.
   const [elements, setElements] = useState<BoardElement[]>([]);
   
-  const [clipboardElements, setClipboardElements] = useState<BoardElement[]>([]);
+  const clipboardElementsRef = useRef<BoardElement[]>([]);
+  const clipboardBoardIdRef = useRef(boardId);
+  const lastPasteSignatureRef = useRef('');
+  const repeatedPasteCountRef = useRef(0);
   const [boardData, setBoardData] = useState<Whiteboard | null>(null);
   // Direct links start with a placeholder; the authorized manifest owns the
   // displayed/exported name, including names changed by another collaborator.
@@ -2445,22 +2454,64 @@ export default function WhiteboardCanvas({
     return () => window.removeEventListener("init-resize", handleResizeStart);
   }, [elements]);
 
-  // Synchronize state and handlers to refs for stable window event listener callbacks
-  const clipboardElementsRef = useRef(clipboardElements);
+  // The native copy event preserves element metadata across reloads/tabs via
+  // text/html, while leaving ordinary text editing and external clipboard use alone.
   useEffect(() => {
-    clipboardElementsRef.current = clipboardElements;
-  }, [clipboardElements]);
+    const handleNativeCopy = (e: ClipboardEvent) => {
+      const focused = document.activeElement;
+      if (focused?.tagName === 'TEXTAREA' || focused?.tagName === 'INPUT' ||
+          (focused instanceof HTMLElement && focused.isContentEditable)) return;
+      const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
+      if (!ids.size) return;
+      const chosen = elementsRef.current.filter((element) => ids.has(element.id));
+      if (!chosen.length) return;
+      try {
+        const copies = JSON.parse(JSON.stringify(chosen)) as BoardElement[];
+        const serialized = serializeElementClipboard(boardId, copies);
+        if (e.clipboardData) {
+          e.clipboardData.setData('text/html', serialized.html);
+          e.clipboardData.setData('text/plain', serialized.text);
+          try { e.clipboardData.setData(WHITEBOARD_CLIPBOARD_MIME, serialized.payload); } catch { /* optional format */ }
+          e.preventDefault();
+        }
+        clipboardElementsRef.current = copies;
+        clipboardBoardIdRef.current = boardId;
+        lastPasteSignatureRef.current = '';
+        repeatedPasteCountRef.current = 0;
+        showSyncToast(serialized.text, 'success', 1800);
+      } catch (error) {
+        showSyncToast(error instanceof Error ? error.message : 'Copy failed.', 'warning');
+      }
+    };
+    window.addEventListener('copy', handleNativeCopy);
+    return () => window.removeEventListener('copy', handleNativeCopy);
+  }, [boardId, showSyncToast]);
 
-  const handlePasteRef = useRef<(() => Promise<void>) | null>(null);
+  const handlePasteRef = useRef<((elements?: BoardElement[], sourceBoardId?: string) => Promise<void>) | null>(null);
 
-  // Handle Paste events for Images!
+  // Native paste prioritizes whiteboard element bundles, then images, then the
+  // internal fallback only when the system clipboard is genuinely unavailable.
   useEffect(() => {
     const handleNativePaste = async (e: ClipboardEvent) => {
       if (
         document.activeElement?.tagName === "TEXTAREA" ||
-        document.activeElement?.tagName === "INPUT"
+        document.activeElement?.tagName === "INPUT" ||
+        (document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable)
       ) {
-        return; // ignore if user is typing in a sticky note or text input
+        return; // let active text editors use native copy/paste
+      }
+
+      const bundle = readElementClipboard(e.clipboardData || null);
+      if (bundle) {
+        e.preventDefault();
+        if (!canWriteRef.current) {
+          triggerReadOnlyAlert();
+          return;
+        }
+        clipboardElementsRef.current = bundle.elements;
+        clipboardBoardIdRef.current = bundle.boardId;
+        void handlePasteRef.current?.(bundle.elements, bundle.boardId);
+        return;
       }
 
       const items = e.clipboardData?.items;
@@ -2588,17 +2639,15 @@ export default function WhiteboardCanvas({
         return;
       }
 
-      // If we DID NOT find images, check if we have copied whiteboard elements in local clipboard
-      if (clipboardElementsRef.current.length > 0) {
+      // Never paste stale whiteboard elements over a user's new external text
+      // clipboard content. Internal fallback is for unavailable clipboard data.
+      if ((!e.clipboardData || !e.clipboardData.types?.length) && clipboardElementsRef.current.length > 0) {
+        e.preventDefault();
         if (!canWriteRef.current) {
-          e.preventDefault();
           triggerReadOnlyAlert();
           return;
         }
-        e.preventDefault();
-        if (handlePasteRef.current) {
-          handlePasteRef.current();
-        }
+        void handlePasteRef.current?.(clipboardElementsRef.current, clipboardBoardIdRef.current);
       }
     };
 
@@ -3585,43 +3634,34 @@ export default function WhiteboardCanvas({
     }
   };
 
-  // Paste elements from clipboard with a slight offset
-  const handlePaste = async () => {
-    if (!canWrite || clipboardElements.length === 0) return;
+  // Preserve group geometry, remap connector endpoints, and advance repeated
+  // pastes without rewriting or mutating the user's system clipboard.
+  const handlePaste = async (
+    sourceElements: BoardElement[] = clipboardElementsRef.current,
+    sourceBoardId: string = clipboardBoardIdRef.current,
+  ) => {
+    if (!canWrite || sourceElements.length === 0) return;
     if (!checkCreationRateLimit(4, 2000)) return;
 
-    let itemsToPaste = clipboardElements;
+    let itemsToPaste = sourceElements;
     if (!isTeacherRef.current && itemsToPaste.length > 10) {
       itemsToPaste = itemsToPaste.slice(0, 10);
       showSyncToast("Pasting capped at 10 items max per batch to prevent lag.", "warning", 4000);
     }
 
     const sandbox = isSandboxEnvironment();
-    const offset = 40;
-    const maxZ = elements.length > 0 ? Math.max(...elements.map(e => e.zIndex || 0)) : 0;
+    const signature = sourceBoardId + ':' + itemsToPaste.map((element) => element.id).join('|');
+    const repeatCount = signature === lastPasteSignatureRef.current ? repeatedPasteCountRef.current + 1 : 1;
+    const offset = 40 * Math.min(repeatCount, 10) / Math.max(0.05, zoomRef.current);
+    const maxZ = elementsRef.current.reduce((max, element) => Math.max(max, element.zIndex || 0), 0);
     const newPasteIds: string[] = [];
     const pastedElements: BoardElement[] = [];
 
     try {
-      for (let i = 0; i < itemsToPaste.length; i += 1) {
-        const source = itemsToPaste[i];
-        const newId = `copy-${Math.random().toString(36).substring(2, 11)}`;
-        let newEl = JSON.parse(JSON.stringify(source)) as BoardElement;
-        newEl.id = newId;
-        newEl.zIndex = maxZ + i + 1;
-        newEl.updatedAt = Date.now() + i;
-
-        if ('x' in newEl && 'y' in newEl) {
-          newEl.x += offset / zoom;
-          newEl.y += offset / zoom;
-        }
-        if (newEl.type === 'drawing') {
-          newEl.points = simplifyPoints(newEl.points.map((point) => ({
-            x: point.x + offset / zoom,
-            y: point.y + offset / zoom,
-          })), 1.5);
-        }
-
+      const cloned = cloneElementsForPaste(itemsToPaste, offset, maxZ, sourceBoardId !== boardId);
+      if (!cloned.length) throw new Error('Select the connected elements together before pasting.');
+      for (const element of cloned) {
+        let newEl = element;
         if (!sandbox) {
           newEl = sanitizeElementForStorage(newEl);
           const bytes = new TextEncoder().encode(JSON.stringify(newEl)).byteLength;
@@ -3629,13 +3669,11 @@ export default function WhiteboardCanvas({
             throw new Error(`Pasted element is too large (${Math.round(bytes / 1024)} KB).`);
           }
         }
-
-        newPasteIds.push(newId);
+        newPasteIds.push(newEl.id);
         pastedElements.push(newEl);
       }
 
-      // All elements are validated before the first queue write, so an invalid
-      // item cannot leave a partially pasted batch in the local persistence map.
+      // Validate the full batch before queueing any persistence mutations.
       if (!sandbox) {
         pastedElements.forEach((element) => {
           queueElementMutation(boardId, element.id, element, 'set');
@@ -3650,7 +3688,8 @@ export default function WhiteboardCanvas({
       elementsRef.current = updatedList;
       setSelectedIds(newPasteIds);
       setSelectedId(null);
-      setClipboardElements(pastedElements);
+      lastPasteSignatureRef.current = signature;
+      repeatedPasteCountRef.current = repeatCount;
 
       if (sandbox) {
         saveSandboxLocalElements(boardId, updatedList);
@@ -3735,14 +3774,6 @@ export default function WhiteboardCanvas({
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && key === "c") {
-        const toCopy = elements.filter(el => selectedIds.includes(el.id) || el.id === (selectedId || ''));
-        if (toCopy.length > 0) {
-          setClipboardElements(JSON.parse(JSON.stringify(toCopy)));
-        }
-        return;
-      }
-
       if (key === "v" && !(e.ctrlKey || e.metaKey)) setActiveTool("select");
       else if (key === "h" && !(e.ctrlKey || e.metaKey)) setActiveTool("pan");
       else if (["p", "i", "k", "n", "s", "t", "m", "l", "e", "g", "u", "o"].includes(key) && !(e.ctrlKey || e.metaKey)) {
@@ -3780,7 +3811,7 @@ export default function WhiteboardCanvas({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedId, selectedIds, elements, clipboardElements, canWrite, zoom, boardId, handleUndo, handleRedo]);
+  }, [selectedId, selectedIds, elements, canWrite, zoom, boardId, handleUndo, handleRedo]);
 
   // Click handler to select an element
   const handleSelectElement = React.useCallback((id: string, e: React.MouseEvent) => {
