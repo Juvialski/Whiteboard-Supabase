@@ -35,6 +35,7 @@ export default function LiveCursors({
     setSnapshot({ boardId, collaborators: [], drawingBounds: [] });
     if (!socketCollaboratorsRef) return;
     let previous = '';
+    let lastChangeAt = 0;
     const update = () => {
       const collaborators = Object.values(socketCollaboratorsRef.current || {})
         .filter(c => c && c.id !== currentUser.id && Number.isFinite(c.x) && Number.isFinite(c.y))
@@ -45,12 +46,38 @@ export default function LiveCursors({
       ].filter((rect): rect is CursorRect => !!rect);
       const signature = JSON.stringify([collaborators.map(c => [c.id, c.x, c.y, c.name, c.color]), drawingBounds]);
       if (signature !== previous) {
-        previous = signature; setSnapshot({ boardId, collaborators, drawingBounds });
+        previous = signature;
+        if (collaborators.length || drawingBounds.length) lastChangeAt = Date.now();
+        setSnapshot({ boardId, collaborators, drawingBounds });
       }
     };
-    update();
-    const interval = setInterval(update, 1000 / 30);
-    return () => clearInterval(interval);
+    // Cursor motion needs smooth updates; an empty/idle room does not.
+    // Pause all overlay work in hidden tabs and restart immediately on focus.
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+    const poll = () => {
+      if (stopped) return;
+      if (document.visibilityState !== 'hidden') update();
+      const activeDrawing = !!localDrawingActiveRef?.current ||
+        Object.keys(remoteDrawingsRef?.current || {}).length > 0;
+      const recentMotion = Date.now() - lastChangeAt < 800;
+      const hasCollaborators = Object.keys(socketCollaboratorsRef.current || {}).length > 0;
+      const interval = document.visibilityState === 'hidden' ? 1000 :
+        (activeDrawing || recentMotion ? 1000 / 30 : hasCollaborators ? 200 : 500);
+      timeout = setTimeout(poll, interval);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (timeout !== null) clearTimeout(timeout);
+      poll();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    poll();
+    return () => {
+      stopped = true;
+      if (timeout !== null) clearTimeout(timeout);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [boardId, currentUser.id, socketCollaboratorsRef, remoteDrawingsRef, localDrawingRef, localDrawingActiveRef, localStrokeWidth]);
   const view = { zoom: Math.max(0.05, zoom), panX, panY };
   const viewport = { width: viewportWidth, height: viewportHeight };

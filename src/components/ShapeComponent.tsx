@@ -645,48 +645,59 @@ export default function ShapeComponent({
 
   const [hoveredCritPoint, setHoveredCritPoint] = useState<CriticalPointItem | null>(null);
 
-  // Smooth variable playback animation loop
+  // Animate graph variables locally; do not persist a board mutation for every
+  // animation frame. Persisted values are updated when the user plays/pauses or
+  // changes a slider, preventing a long lesson from generating hundreds of writes.
+  const hasAnimatingVariables = Object.values(cartesianVariables).some((variable) => Boolean(variable.isAnimating));
   useEffect(() => {
-    let animId: number;
-    const hasAnimating = (Object.values(cartesianVariables) as Array<{ isAnimating?: boolean }>).some((variable) => Boolean(variable.isAnimating));
+    if (!hasAnimatingVariables || !canWrite) return;
+    let animId: number | null = null;
+    let lastTime = performance.now();
+    let lastPaintTime = 0;
+    let disposed = false;
 
-    if (hasAnimating) {
-      let lastTime = performance.now();
-      const animate = (time: number) => {
-        const delta = (time - lastTime) / 1000;
+    const animate = (time: number) => {
+      animId = null;
+      if (disposed || document.visibilityState === 'hidden') return;
+      // Redraw at most 30fps. Calculation and canvas rendering are still live
+      // locally, while collaborative storage is changed only on user actions.
+      if (time - lastPaintTime >= 33) {
+        const delta = Math.max(0, Math.min((time - lastTime) / 1000, 0.1));
         lastTime = time;
-
+        lastPaintTime = time;
         setCartesianVariables((prev) => {
           let updated = false;
           const next = { ...prev };
-
-          Object.keys(next).forEach((vName) => {
-            const v = { ...next[vName] };
-            if (v.isAnimating) {
-              updated = true;
-              let nextVal = v.val + (v.step || 0.1) * 20 * delta;
-              if (nextVal > v.max) nextVal = v.min;
-              v.val = parseFloat(nextVal.toFixed(2));
-              next[vName] = v;
-            }
+          Object.keys(next).forEach((name) => {
+            const variable = next[name];
+            if (!variable.isAnimating) return;
+            updated = true;
+            let value = variable.val + (variable.step || 0.1) * 20 * delta;
+            if (value > variable.max) value = variable.min;
+            next[name] = { ...variable, val: parseFloat(value.toFixed(2)) };
           });
-
-          if (updated) {
-            onUpdate({ cartesianVariables: next });
-          }
-          return next;
+          return updated ? next : prev;
         });
-
-        animId = requestAnimationFrame(animate);
-      };
-
+      }
       animId = requestAnimationFrame(animate);
-    }
-
-    return () => {
-      if (animId) cancelAnimationFrame(animId);
     };
-  }, [cartesianVariables]);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && animId === null) {
+        lastTime = performance.now();
+        animId = requestAnimationFrame(animate);
+      } else if (document.visibilityState === 'hidden' && animId !== null) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    onVisibility();
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (animId !== null) cancelAnimationFrame(animId);
+    };
+  }, [hasAnimatingVariables, canWrite]);
 
   // Interactive Graphing States
   const [graphInteractionMode, setGraphInteractionMode] = useState<

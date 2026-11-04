@@ -223,14 +223,17 @@ export default function App() {
     };
 
     void loadSetting();
-    const poll = window.setInterval(() => void loadSetting(), 60_000);
-    const handleFocus = () => void loadSetting();
+    const refreshVisible = () => { if (document.visibilityState === 'visible') void loadSetting(); };
+    const poll = window.setInterval(refreshVisible, 60_000);
+    const handleFocus = refreshVisible;
     window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', refreshVisible);
 
     return () => {
       active = false;
       window.clearInterval(poll);
       window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', refreshVisible);
     };
   }, [authInitialized, authUserId]);
 

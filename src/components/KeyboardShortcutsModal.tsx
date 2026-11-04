@@ -36,6 +36,7 @@ export default function KeyboardShortcutsModal({ isOpen, onClose }: KeyboardShor
         { key: "Ctrl + Y", label: "Redo action" },
         { key: "Ctrl + C", label: "Copy selected items" },
         { key: "Ctrl + V", label: "Paste items" },
+        { key: "Ctrl + D", label: "Duplicate selected items" },
         { key: "Del / Backspace", label: "Delete selection" },
         { key: "Esc", label: "Clear selection / Stop following" },
       ],

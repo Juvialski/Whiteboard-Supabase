@@ -120,6 +120,13 @@ import { useBoardTimer } from "../hooks/useBoardTimer";
 import { calculatePdfPageReflowPositions, exportPdfWithDrawings } from "../utils/pdf";
 import { exportBoardImage } from "../utils/boardExport";
 import { sampleRealtimeDrawingPoints, prepareRealtimeElementData } from "../utils/realtimeDrawing";
+import {
+  WHITEBOARD_CLIPBOARD_MIME,
+  cloneElementsForPaste,
+  readElementClipboard,
+  selectedElementsForCopy,
+  serializeElementClipboard,
+} from "../utils/elementClipboard";
 
 interface CompressedImage {
   base64Str: string;
@@ -469,7 +476,10 @@ export default function WhiteboardCanvas({
   // retains only unsynced mutations and is merged after access is verified.
   const [elements, setElements] = useState<BoardElement[]>([]);
   
-  const [clipboardElements, setClipboardElements] = useState<BoardElement[]>([]);
+  const clipboardElementsRef = useRef<BoardElement[]>([]);
+  const clipboardBoardIdRef = useRef(boardId);
+  const lastPasteSignatureRef = useRef('');
+  const repeatedPasteCountRef = useRef(0);
   const [boardData, setBoardData] = useState<Whiteboard | null>(null);
   // Direct links start with a placeholder; the authorized manifest owns the
   // displayed/exported name, including names changed by another collaborator.
@@ -741,6 +751,7 @@ export default function WhiteboardCanvas({
               color: msg.color || "#ef4444",
             },
           ];
+          wakeLaserAnimationRef.current();
         } else if (msg.type === "emoji_reaction") {
           if (msg.userId === currentUser.id) return;
           setIncomingReaction({
@@ -975,6 +986,7 @@ export default function WhiteboardCanvas({
   const localLaserPointsRef = useRef<LaserPoint[]>([]);
   const remoteLaserPointsRef = useRef<{ [userId: string]: LaserPoint[] }>({});
   const laserCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wakeLaserAnimationRef = useRef<() => void>(() => {});
 
   // Kami Tools Modals & Navigation States
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
@@ -1188,33 +1200,48 @@ export default function WhiteboardCanvas({
       ctx.globalAlpha = 1.0;
       ctx.fill();
     });
+    return streams.length > 0;
   };
 
-  // Continuous animation loop to decay fading laser trail points smoothly
+  // Render only while a local/remote laser trail exists. Previously this cleared
+  // a full-screen canvas at 60 fps for the entire lifetime of every open board.
   useEffect(() => {
-    let animId: number;
+    let animId: number | null = null;
+    let disposed = false;
     const tick = () => {
+      animId = null;
+      if (disposed || document.visibilityState === 'hidden') return;
       const canvas = laserCanvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          // Adjust canvas internal size to actual display size (supports high DPI)
-          const rect = canvas.getBoundingClientRect();
-          const dpr = window.devicePixelRatio || 1;
-          const width = Math.round(rect.width * dpr);
-          const height = Math.round(rect.height * dpr);
-          if (canvas.width !== width || canvas.height !== height) {
-            canvas.width = width;
-            canvas.height = height;
-            ctx.scale(dpr, dpr);
-          }
-          drawLaserTrails(ctx, rect.width, rect.height);
-        }
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) return;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(rect.width * dpr));
+      const height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
-      animId = requestAnimationFrame(tick);
+      // The final frame clears expired trails, then stops scheduling work.
+      if (drawLaserTrails(ctx, rect.width, rect.height)) requestFrame();
     };
-    animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
+    const requestFrame = () => {
+      if (!disposed && animId === null && document.visibilityState !== 'hidden') {
+        animId = requestAnimationFrame(tick);
+      }
+    };
+    wakeLaserAnimationRef.current = requestFrame;
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') requestFrame();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      wakeLaserAnimationRef.current = () => {};
+      if (animId !== null) cancelAnimationFrame(animId);
+    };
   }, []);
 
   // Permission states using getBoardPermissions
@@ -2309,6 +2336,7 @@ export default function WhiteboardCanvas({
     if (!canWrite && activeTool !== "select" && activeTool !== "pan") {
       setActiveTool("select");
       localLaserPointsRef.current = [];
+      wakeLaserAnimationRef.current();
     }
   }, [canWrite, activeTool]);
 
@@ -2427,22 +2455,64 @@ export default function WhiteboardCanvas({
     return () => window.removeEventListener("init-resize", handleResizeStart);
   }, [elements]);
 
-  // Synchronize state and handlers to refs for stable window event listener callbacks
-  const clipboardElementsRef = useRef(clipboardElements);
+  // The native copy event preserves element metadata across reloads/tabs via
+  // text/html, while leaving ordinary text editing and external clipboard use alone.
   useEffect(() => {
-    clipboardElementsRef.current = clipboardElements;
-  }, [clipboardElements]);
+    const handleNativeCopy = (e: ClipboardEvent) => {
+      const focused = document.activeElement;
+      if (focused?.tagName === 'TEXTAREA' || focused?.tagName === 'INPUT' ||
+          (focused instanceof HTMLElement && focused.isContentEditable)) return;
+      const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
+      if (!ids.size) return;
+      const chosen = selectedElementsForCopy(elementsRef.current, ids);
+      if (!chosen.length) return;
+      try {
+        const copies = JSON.parse(JSON.stringify(chosen)) as BoardElement[];
+        const serialized = serializeElementClipboard(boardId, copies);
+        if (e.clipboardData) {
+          e.clipboardData.setData('text/html', serialized.html);
+          e.clipboardData.setData('text/plain', serialized.text);
+          try { e.clipboardData.setData(WHITEBOARD_CLIPBOARD_MIME, serialized.payload); } catch { /* optional format */ }
+          e.preventDefault();
+        }
+        clipboardElementsRef.current = copies;
+        clipboardBoardIdRef.current = boardId;
+        lastPasteSignatureRef.current = '';
+        repeatedPasteCountRef.current = 0;
+        showSyncToast(serialized.text, 'success', 1800);
+      } catch (error) {
+        showSyncToast(error instanceof Error ? error.message : 'Copy failed.', 'warning');
+      }
+    };
+    window.addEventListener('copy', handleNativeCopy);
+    return () => window.removeEventListener('copy', handleNativeCopy);
+  }, [boardId, showSyncToast]);
 
-  const handlePasteRef = useRef<(() => Promise<void>) | null>(null);
+  const handlePasteRef = useRef<((elements?: BoardElement[], sourceBoardId?: string) => Promise<void>) | null>(null);
 
-  // Handle Paste events for Images!
+  // Native paste prioritizes whiteboard element bundles, then images, then the
+  // internal fallback only when the system clipboard is genuinely unavailable.
   useEffect(() => {
     const handleNativePaste = async (e: ClipboardEvent) => {
       if (
         document.activeElement?.tagName === "TEXTAREA" ||
-        document.activeElement?.tagName === "INPUT"
+        document.activeElement?.tagName === "INPUT" ||
+        (document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable)
       ) {
-        return; // ignore if user is typing in a sticky note or text input
+        return; // let active text editors use native copy/paste
+      }
+
+      const bundle = readElementClipboard(e.clipboardData || null);
+      if (bundle) {
+        e.preventDefault();
+        if (!canWriteRef.current) {
+          triggerReadOnlyAlert();
+          return;
+        }
+        clipboardElementsRef.current = bundle.elements;
+        clipboardBoardIdRef.current = bundle.boardId;
+        void handlePasteRef.current?.(bundle.elements, bundle.boardId);
+        return;
       }
 
       const items = e.clipboardData?.items;
@@ -2570,17 +2640,15 @@ export default function WhiteboardCanvas({
         return;
       }
 
-      // If we DID NOT find images, check if we have copied whiteboard elements in local clipboard
-      if (clipboardElementsRef.current.length > 0) {
+      // Never paste stale whiteboard elements over a user's new external text
+      // clipboard content. Internal fallback is for unavailable clipboard data.
+      if ((!e.clipboardData || !e.clipboardData.types?.length) && clipboardElementsRef.current.length > 0) {
+        e.preventDefault();
         if (!canWriteRef.current) {
-          e.preventDefault();
           triggerReadOnlyAlert();
           return;
         }
-        e.preventDefault();
-        if (handlePasteRef.current) {
-          handlePasteRef.current();
-        }
+        void handlePasteRef.current?.(clipboardElementsRef.current, clipboardBoardIdRef.current);
       }
     };
 
@@ -2634,6 +2702,7 @@ export default function WhiteboardCanvas({
       const color = activeColor || "#ef4444";
       const newPt = { x: coords.x, y: coords.y, timestamp: now, color };
       localLaserPointsRef.current = [...localLaserPointsRef.current.filter((p) => now - p.timestamp < 1500), newPt];
+      wakeLaserAnimationRef.current();
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
           JSON.stringify({
@@ -2887,6 +2956,7 @@ export default function WhiteboardCanvas({
       const color = activeColorRef.current || "#ef4444";
       const newPt = { x: coords.x, y: coords.y, timestamp: now, color };
       localLaserPointsRef.current = [...localLaserPointsRef.current.filter((p) => now - p.timestamp < 1500), newPt];
+      wakeLaserAnimationRef.current();
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && now - lastStreamBroadcast.current > 20) {
         lastStreamBroadcast.current = now;
@@ -3565,43 +3635,34 @@ export default function WhiteboardCanvas({
     }
   };
 
-  // Paste elements from clipboard with a slight offset
-  const handlePaste = async () => {
-    if (!canWrite || clipboardElements.length === 0) return;
+  // Preserve group geometry, remap connector endpoints, and advance repeated
+  // pastes without rewriting or mutating the user's system clipboard.
+  const handlePaste = async (
+    sourceElements: BoardElement[] = clipboardElementsRef.current,
+    sourceBoardId: string = clipboardBoardIdRef.current,
+  ) => {
+    if (!canWrite || sourceElements.length === 0) return;
     if (!checkCreationRateLimit(4, 2000)) return;
 
-    let itemsToPaste = clipboardElements;
+    let itemsToPaste = sourceElements;
     if (!isTeacherRef.current && itemsToPaste.length > 10) {
       itemsToPaste = itemsToPaste.slice(0, 10);
       showSyncToast("Pasting capped at 10 items max per batch to prevent lag.", "warning", 4000);
     }
 
     const sandbox = isSandboxEnvironment();
-    const offset = 40;
-    const maxZ = elements.length > 0 ? Math.max(...elements.map(e => e.zIndex || 0)) : 0;
+    const signature = sourceBoardId + ':' + itemsToPaste.map((element) => element.id).join('|');
+    const repeatCount = signature === lastPasteSignatureRef.current ? repeatedPasteCountRef.current + 1 : 1;
+    const offset = 40 * repeatCount / Math.max(0.05, zoomRef.current);
+    const maxZ = elementsRef.current.reduce((max, element) => Math.max(max, element.zIndex || 0), 0);
     const newPasteIds: string[] = [];
     const pastedElements: BoardElement[] = [];
 
     try {
-      for (let i = 0; i < itemsToPaste.length; i += 1) {
-        const source = itemsToPaste[i];
-        const newId = `copy-${Math.random().toString(36).substring(2, 11)}`;
-        let newEl = JSON.parse(JSON.stringify(source)) as BoardElement;
-        newEl.id = newId;
-        newEl.zIndex = maxZ + i + 1;
-        newEl.updatedAt = Date.now() + i;
-
-        if ('x' in newEl && 'y' in newEl) {
-          newEl.x += offset / zoom;
-          newEl.y += offset / zoom;
-        }
-        if (newEl.type === 'drawing') {
-          newEl.points = simplifyPoints(newEl.points.map((point) => ({
-            x: point.x + offset / zoom,
-            y: point.y + offset / zoom,
-          })), 1.5);
-        }
-
+      const cloned = cloneElementsForPaste(itemsToPaste, offset, maxZ, sourceBoardId !== boardId);
+      if (!cloned.length) throw new Error('Select the connected elements together before pasting.');
+      for (const element of cloned) {
+        let newEl = element;
         if (!sandbox) {
           newEl = sanitizeElementForStorage(newEl);
           const bytes = new TextEncoder().encode(JSON.stringify(newEl)).byteLength;
@@ -3609,13 +3670,11 @@ export default function WhiteboardCanvas({
             throw new Error(`Pasted element is too large (${Math.round(bytes / 1024)} KB).`);
           }
         }
-
-        newPasteIds.push(newId);
+        newPasteIds.push(newEl.id);
         pastedElements.push(newEl);
       }
 
-      // All elements are validated before the first queue write, so an invalid
-      // item cannot leave a partially pasted batch in the local persistence map.
+      // Validate the full batch before queueing any persistence mutations.
       if (!sandbox) {
         pastedElements.forEach((element) => {
           queueElementMutation(boardId, element.id, element, 'set');
@@ -3623,14 +3682,22 @@ export default function WhiteboardCanvas({
       }
 
       const updatedList = [...elementsRef.current, ...pastedElements];
-      pastedElements.forEach((element) => {
-        pushToUndo({ type: "add", elementId: element.id, afterData: element });
+      // Paste is a single user action: one Undo removes the whole copied group,
+      // including its remapped connectors. Redo restores the group together.
+      pushToUndo({
+        type: "batch",
+        actions: pastedElements.map((element) => ({
+          type: "add",
+          elementId: element.id,
+          afterData: element,
+        })),
       });
       setElements(updatedList);
       elementsRef.current = updatedList;
       setSelectedIds(newPasteIds);
       setSelectedId(null);
-      setClipboardElements(pastedElements);
+      lastPasteSignatureRef.current = signature;
+      repeatedPasteCountRef.current = repeatCount;
 
       if (sandbox) {
         saveSandboxLocalElements(boardId, updatedList);
@@ -3663,17 +3730,30 @@ export default function WhiteboardCanvas({
     handlePasteRef.current = handlePaste;
   }, [handlePaste]);
 
+  const handleDuplicateSelection = () => {
+    if (!canWrite) { triggerReadOnlyAlert(); return; }
+    const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
+    const selection = selectedElementsForCopy(elementsRef.current, ids);
+    if (selection.length) void handlePasteRef.current?.(selection, boardId);
+  };
+
   // Keyboard shortcut listeners (standard whiteboards experience!)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         document.activeElement?.tagName === "TEXTAREA" ||
-        document.activeElement?.tagName === "INPUT"
+        document.activeElement?.tagName === "INPUT" ||
+        (document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable)
       ) {
         return; // ignore when typing
       }
 
       const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === "d" && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        handleDuplicateSelection();
+        return;
+      }
       if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
         e.preventDefault();
         setIsShortcutsOpen((prev) => !prev);
@@ -3715,14 +3795,6 @@ export default function WhiteboardCanvas({
         return;
       }
 
-      if ((e.ctrlKey || e.metaKey) && key === "c") {
-        const toCopy = elements.filter(el => selectedIds.includes(el.id) || el.id === (selectedId || ''));
-        if (toCopy.length > 0) {
-          setClipboardElements(JSON.parse(JSON.stringify(toCopy)));
-        }
-        return;
-      }
-
       if (key === "v" && !(e.ctrlKey || e.metaKey)) setActiveTool("select");
       else if (key === "h" && !(e.ctrlKey || e.metaKey)) setActiveTool("pan");
       else if (["p", "i", "k", "n", "s", "t", "m", "l", "e", "g", "u", "o"].includes(key) && !(e.ctrlKey || e.metaKey)) {
@@ -3760,7 +3832,7 @@ export default function WhiteboardCanvas({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedId, selectedIds, elements, clipboardElements, canWrite, zoom, boardId, handleUndo, handleRedo]);
+  }, [selectedId, selectedIds, elements, canWrite, zoom, boardId, handleUndo, handleRedo]);
 
   // Click handler to select an element
   const handleSelectElement = React.useCallback((id: string, e: React.MouseEvent) => {
@@ -3824,7 +3896,9 @@ export default function WhiteboardCanvas({
       }
       return updatedSelectedIds;
     });
-    setSelectedId(id);
+    // Shift-click can remove the clicked element from the selection. Do not
+    // keep it as the single-selection fallback for copy, duplicate or delete.
+    setSelectedId(e.shiftKey && selectedIdsRef.current.includes(id) ? null : id);
   }, [activeTool, canWrite, handleDeleteElement, setSelectedIds, setSelectedId, setIsDragging, setDragStart, setElementStartPositions]);
 
   // Update specific values of an element
@@ -4233,6 +4307,8 @@ export default function WhiteboardCanvas({
         redoStack={redoStack}
         handleUndo={handleUndo}
         handleRedo={handleRedo}
+        onDuplicate={handleDuplicateSelection}
+        canDuplicate={canWrite && (selectedIds.length > 0 || selectedId !== null)}
         onExportSelection={handleExportSelection}
         hasSelection={selectedIds.length > 0}
         onExportBackup={handleExportBackup}

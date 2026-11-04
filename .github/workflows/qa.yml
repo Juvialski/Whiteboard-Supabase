@@ -24,3 +24,14 @@ jobs:
       - run: npm test
       - run: npm run test:integration
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Browser clipboard regression
+        run: |
+          VITE_LOCAL_SANDBOX=true npm run dev > /tmp/whiteboard-browser-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..60}; do
+            if curl --silent --fail http://localhost:3000/ > /dev/null; then break; fi
+            sleep 1
+          done
+          BROWSER_CHANNEL=chromium npm run test:browser
