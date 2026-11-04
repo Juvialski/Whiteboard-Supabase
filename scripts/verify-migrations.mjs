@@ -17,7 +17,6 @@ const expected = [
   '202608070001_add_individual_member_view_only.sql',
   '202608080001_free_tier_concurrency_optimizations.sql',
   '20261008230648_stab_1_timer_reliability.sql',
-  '20261104044950_timer_conflict_no_retry.sql',
 ];
 
 const failures = [];
