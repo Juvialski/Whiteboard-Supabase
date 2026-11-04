@@ -1,0 +1,9 @@
+# Timer conflict CPU investigation
+
+On 2026-11-04, the Whiteboard project dashboard showed CPU near saturation over the preceding 24 hours, dominated by user CPU with much smaller system CPU and near-zero I/O wait. A Supabase warning arrived at 11:50 Asia/Manila. The PostgreSQL log stream contained about 86,000 sampled `Timer changed in another client` errors in 24 hours; samples identified PostgREST 14.5, SQLSTATE 40001, and `transition_board_timer`. Concurrent calls were observed waiting on timer locks. A single database session's log sequence advanced far faster than the ingested log count, so the sampled count is not the total number of attempts.
+
+Supabase documents that PostgREST 14 can retry a deterministic 40001 indefinitely, even for a stale application revision. The timer RPC deliberately raises 40001 for that condition. This closely matches the observed sustained errors and high user CPU, and is a strong causal diagnosis, but a post-fix production comparison is needed to verify the CPU impact. The existing PR's cursor and viewport changes reduce browser work; they do not correct this database retry loop.
+
+The migration replaces the business-conflict SQLSTATE with P0001 while retaining the message, access checks, and transactional rollback. Existing application code treats all RPC errors generically and refreshes before an explicit retry. Direct API consumers that inspect SQLSTATE 40001 must be updated: the error code is an observable compatibility change. No data or table changes are made. The migration is not applied by this PR; review deployment separately. A pre-existing runaway request may need separate operational intervention, and should be investigated using Supabase guidance rather than assuming closing a browser tab will stop it.
+
+Reference: https://supabase.com/kb/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions

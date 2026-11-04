@@ -3734,12 +3734,21 @@ export default function WhiteboardCanvas({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         document.activeElement?.tagName === "TEXTAREA" ||
-        document.activeElement?.tagName === "INPUT"
+        document.activeElement?.tagName === "INPUT" ||
+        (document.activeElement instanceof HTMLElement && document.activeElement.isContentEditable)
       ) {
         return; // ignore when typing
       }
 
       const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === "d" && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        if (!canWrite) { triggerReadOnlyAlert(); return; }
+        const ids = new Set([...selectedIdsRef.current, ...(selectedIdRef.current ? [selectedIdRef.current] : [])]);
+        const selection = elementsRef.current.filter(element => ids.has(element.id));
+        if (selection.length) void handlePasteRef.current?.(selection, boardId);
+        return;
+      }
       if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
         e.preventDefault();
         setIsShortcutsOpen((prev) => !prev);
@@ -3882,7 +3891,9 @@ export default function WhiteboardCanvas({
       }
       return updatedSelectedIds;
     });
-    setSelectedId(id);
+    // Shift-click can remove the clicked element from the selection. Do not
+    // keep it as the single-selection fallback for copy, duplicate or delete.
+    setSelectedId(e.shiftKey && selectedIdsRef.current.includes(id) ? null : id);
   }, [activeTool, canWrite, handleDeleteElement, setSelectedIds, setSelectedId, setIsDragging, setDragStart, setElementStartPositions]);
 
   // Update specific values of an element
