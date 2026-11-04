@@ -69,10 +69,10 @@ export function cloneElementsForPaste(
     (('signatureAssetId' in element) && element.signatureAssetId))) {
     throw new Error('Cloud media cannot yet be pasted between different boards. Copy it within the original board.');
   }
-  const ids = new Map(elements.map((element) => [
-    element.id,
-    'copy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12),
-  ]));
+  const ids = new Map<string, string>();
+  elements.forEach((element) => {
+    ids.set(element.id, 'copy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12));
+  });
   return elements.flatMap((source, index) => {
     if (fromAnotherBoard && source.type === 'connector' &&
         (!ids.has(source.fromId) || (source.toId && !ids.has(source.toId)))) return [];
